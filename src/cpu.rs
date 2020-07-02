@@ -68,27 +68,71 @@ impl Cpu {
     fn get_operand_as_val(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u8 {
         use crate::isa::AddressingMode::*;
         match *addr_mode {
+            // Any implied operands should not need to call this function.
+            Imp => unreachable!(),
             // Literally just the value.
             Imm => low_byte, 
+            // The accumulator register value.
+            Acc => self.registers.acc,
             // We only need the first byte, and we know it resides in the
             // page. So just fetch the value at that address.
             Zpg => {
                 let addr = low_byte as u16;
                 self.read(&addr)
             },
+            // Add the X register to the zero page address, and discard any overflow.
             ZpgX => {
                 let addr = ((low_byte + self.registers.x) & 0xff) as u16;
                 self.read(&addr)
             },
+            // Same here, except for the Y register.
             ZpgY => {
                 let addr = ((low_byte + self.registers.y) & 0xff) as u16;
                 self.read(&addr)
             },
+            // Just look at the actual address.
             Abs => {
-                let addr = ((high_byte << 4) | low_byte) as u16;
+                let addr = ((high_byte as u16) << 4) | low_byte as u16;
+                self.read(&addr)
+            },
+            // Absolute address with an X offset.
+            AbsX => {
+                let addr = ((((high_byte as u16) << 4) | (low_byte as u16)) + self.registers.x as u16) & 0xffff;
                 self.read(&addr)
             }
-            _ => 0,
+            // Absolute address with a Y offset.
+            AbsY => {
+                let addr = ((((high_byte as u16) << 4) | (low_byte as u16)) + self.registers.y as u16) & 0xffff;
+                self.read(&addr)
+            }
+            // Relative addressing to the program counter.
+            Rel => {
+                // TODO: add extra cycle for page transition
+                // TODO: check if this is for pc or pc + 1?
+                let addr = ((self.registers.pc as i16) + (low_byte as i16)) as u16;
+                self.read(&addr)
+            }
+            // Has two layers of indirection; read the address first and then read that address.
+            Ind => {
+                let addr = ((high_byte as u16) << 4) | low_byte as u16;
+                let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
+                let ind_addr = ((ind_addr_high as u16) << 4) | ind_addr_low as u16;
+                self.read(&ind_addr)
+            }
+            // Indexes the initial indirection by the X register.
+            IndX => {
+                let addr = ((((high_byte as u16) << 4) | low_byte as u16) + self.registers.x as u16) & 0xffff;
+                let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
+                let ind_addr = ((ind_addr_high as u16) << 4) | ind_addr_low as u16;
+                self.read(&ind_addr)
+            }
+            // Indexes the second indirection by the Y register.
+            IndY => {
+                let addr = ((high_byte as u16) << 4) | low_byte as u16;
+                let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
+                let ind_addr = ((((ind_addr_high as u16) << 4) | ind_addr_low as u16) + self.registers.y as u16) & 0xffff;
+                self.read(&ind_addr)
+            }
         }
     }
 
