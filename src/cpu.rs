@@ -1,17 +1,25 @@
 use crate::isa::*;
+use bitfield::*;
+
+bitfield! {
+    pub struct StatusFlags(u8);
+    impl Debug;
+    carry, set_carry: 0;
+    zero, set_zero: 1;
+    interrupt_disable, set_interrupt: 2;
+    decimal, set_decimal: 3;
+    bflag, set_bflag: 5, 4;
+    overflow, set_overflow: 6;
+    negative, set_negative: 7;
+}
 
 pub struct CpuRegs {
     pub acc: u8,
     pub x: u8,
     pub y: u8,
     pub pc: u16,
-    pub s: u8,
+    pub s: StatusFlags,
     pub p: u8,
-}
-
-union Operand {
-    byte: u8,
-    two_bytes: u16,
 }
 
 impl CpuRegs {
@@ -21,7 +29,7 @@ impl CpuRegs {
             x: 0x0,
             y: 0x0,
             pc: 0x8000,
-            s: 0xfd,
+            s: StatusFlags(0xfd),
             p: 0x34,
         }
     }
@@ -139,15 +147,26 @@ impl Cpu {
     fn execute_instruction(&mut self) {
         use crate::isa::Opcode::*;
         if let Some((opc, addr_mode, _)) = self.curr_instruction {
+            let (byte1, byte2) = (self.read(&(self.registers.pc + 1)), self.read(&(self.registers.pc + 2)));
             match *opc {
                 LDA => {
-                    let (byte1, byte2) = (self.read(&(self.registers.pc + 1)), self.read(&(self.registers.pc + 2)));
                     // TODO big endian or little endian??
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode);
                     self.registers.acc = val;
-                }
+                    self.registers.s.set_negative(val > 0x7f);
+                    self.registers.s.set_zero(val == 0x00);
+                },
                 LDX => {
-
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
+                    self.registers.x = val;
+                    self.registers.s.set_negative((val >> 7) == 1);
+                    self.registers.s.set_zero(val == 0x00);
+                },
+                LDY => {
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
+                    self.registers.y = val;
+                    self.registers.s.set_negative(val > 0x7f);
+                    self.registers.s.set_zero(val == 0x00);
                 }
                 _ => unimplemented!(),
             }
