@@ -1,3 +1,4 @@
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Opcode {
     // Storage
     LDA,

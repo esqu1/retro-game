@@ -1,6 +1,8 @@
 use crate::isa::*;
 use bitfield::*;
 
+#[allow(dead_code)]
+
 bitfield! {
     pub struct StatusFlags(u8);
     impl Debug;
@@ -18,8 +20,8 @@ pub struct CpuRegs {
     pub x: u8,
     pub y: u8,
     pub pc: u16,
-    pub s: StatusFlags,
-    pub p: u8,
+    pub s: u8,
+    pub p: StatusFlags,
 }
 
 impl CpuRegs {
@@ -29,10 +31,14 @@ impl CpuRegs {
             x: 0x0,
             y: 0x0,
             pc: 0x8000,
-            s: StatusFlags(0xfd),
-            p: 0x34,
+            s: 0xfd,
+            p: StatusFlags(0x34),
         }
     }
+}
+
+fn bytes_as_16bit_addr(low_byte: u8, high_byte: u8) -> u16 {
+    ((high_byte as u16) << 8) | low_byte as u16
 }
 
 pub struct Cpu {
@@ -57,17 +63,37 @@ impl Cpu {
         if *addr < 0x2000 {
             self.ram[(*addr & 0x07ff) as usize]
         } else if *addr < 0x3fff {
-            0
-        // read from PPU registers
+            // read from PPU registers
+            unimplemented!();
         } else if *addr < 0x4018 {
-            0
-        // read from APU or I/O
+            // read from APU or I/O
+            unimplemented!();
         } else if *addr < 0x401f {
+            // not allowed!
             unreachable!();
-        // not allowed!
         } else if *addr < 0xffff {
-            0
-        // read the ROM through the mapper
+            // read the ROM through the mapper
+            unimplemented!();
+        } else {
+            panic!("address is out of bounds of CPU memory");
+        }
+    }
+
+    pub fn write(&mut self, addr: &u16, val: u8) {
+        if *addr < 0x2000 {
+            self.ram[(*addr & 0x07ff) as usize] = val;
+        } else if *addr < 0x3fff {
+            // write to a PPU register
+            unimplemented!();
+        } else if *addr < 0x4018 {
+            // write to APU or I/O
+            unimplemented!();
+        } else if *addr < 0x401f {
+            // not allowed!
+            unreachable!();
+        } else if *addr < 0xffff {
+            // write to ROM, is this allowed??
+            unreachable!();
         } else {
             panic!("address is out of bounds of CPU memory");
         }
@@ -79,7 +105,7 @@ impl Cpu {
             // Any implied operands should not need to call this function.
             Imp => unreachable!(),
             // Literally just the value.
-            Imm => low_byte, 
+            Imm => low_byte,
             // The accumulator register value.
             Acc => self.registers.acc,
             // We only need the first byte, and we know it resides in the
@@ -87,30 +113,32 @@ impl Cpu {
             Zpg => {
                 let addr = low_byte as u16;
                 self.read(&addr)
-            },
+            }
             // Add the X register to the zero page address, and discard any overflow.
             ZpgX => {
                 let addr = ((low_byte + self.registers.x) & 0xff) as u16;
                 self.read(&addr)
-            },
+            }
             // Same here, except for the Y register.
             ZpgY => {
                 let addr = ((low_byte + self.registers.y) & 0xff) as u16;
                 self.read(&addr)
-            },
+            }
             // Just look at the actual address.
             Abs => {
-                let addr = ((high_byte as u16) << 4) | low_byte as u16;
+                let addr = bytes_as_16bit_addr(low_byte, high_byte);
                 self.read(&addr)
-            },
+            }
             // Absolute address with an X offset.
             AbsX => {
-                let addr = ((((high_byte as u16) << 4) | (low_byte as u16)) + self.registers.x as u16) & 0xffff;
+                let addr =
+                    (bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16) & 0xffff;
                 self.read(&addr)
             }
             // Absolute address with a Y offset.
             AbsY => {
-                let addr = ((((high_byte as u16) << 4) | (low_byte as u16)) + self.registers.y as u16) & 0xffff;
+                let addr =
+                    (bytes_as_16bit_addr(low_byte, high_byte) + self.registers.y as u16) & 0xffff;
                 self.read(&addr)
             }
             // Relative addressing to the program counter.
@@ -122,51 +150,163 @@ impl Cpu {
             }
             // Has two layers of indirection; read the address first and then read that address.
             Ind => {
-                let addr = ((high_byte as u16) << 4) | low_byte as u16;
+                let addr = bytes_as_16bit_addr(low_byte, high_byte);
                 let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
-                let ind_addr = ((ind_addr_high as u16) << 4) | ind_addr_low as u16;
+                let ind_addr = bytes_as_16bit_addr(ind_addr_low, ind_addr_high);
                 self.read(&ind_addr)
             }
             // Indexes the initial indirection by the X register.
             IndX => {
-                let addr = ((((high_byte as u16) << 4) | low_byte as u16) + self.registers.x as u16) & 0xffff;
+                let addr =
+                    (bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16) & 0xffff;
                 let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
-                let ind_addr = ((ind_addr_high as u16) << 4) | ind_addr_low as u16;
+                let ind_addr = bytes_as_16bit_addr(ind_addr_low, ind_addr_high);
                 self.read(&ind_addr)
             }
             // Indexes the second indirection by the Y register.
             IndY => {
-                let addr = ((high_byte as u16) << 4) | low_byte as u16;
+                let addr = bytes_as_16bit_addr(low_byte, high_byte);
                 let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
-                let ind_addr = ((((ind_addr_high as u16) << 4) | ind_addr_low as u16) + self.registers.y as u16) & 0xffff;
+                let ind_addr = (bytes_as_16bit_addr(ind_addr_low, ind_addr_high)
+                    + self.registers.y as u16)
+                    & 0xffff;
                 self.read(&ind_addr)
             }
+        }
+    }
+
+    fn get_operand_as_dest(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u16 {
+        use crate::isa::AddressingMode::*;
+        match *addr_mode {
+            // An immediate value cannot be used as an address (only an absolute value).
+            Imm | Imp | Rel | Acc => unreachable!(),
+            Abs => bytes_as_16bit_addr(low_byte, high_byte),
+            AbsX => bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16,
+            AbsY => bytes_as_16bit_addr(low_byte, high_byte) + self.registers.y as u16,
+            Ind => {
+                let addr = bytes_as_16bit_addr(low_byte, high_byte);
+                bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
+            }
+            IndX => {
+                let addr = bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16;
+                bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
+            }
+            IndY => {
+                let addr = bytes_as_16bit_addr(low_byte, high_byte);
+                bytes_as_16bit_addr(self.read(&addr), self.read(&addr)) + self.registers.y as u16
+            }
+            Zpg => low_byte as u16,
+            ZpgX => (low_byte + self.registers.x) as u16,
+            ZpgY => (low_byte + self.registers.y) as u16,
         }
     }
 
     fn execute_instruction(&mut self) {
         use crate::isa::Opcode::*;
         if let Some((opc, addr_mode, _)) = self.curr_instruction {
-            let (byte1, byte2) = (self.read(&(self.registers.pc + 1)), self.read(&(self.registers.pc + 2)));
+            let (byte1, byte2) = (
+                self.read(&(self.registers.pc + 1)),
+                self.read(&(self.registers.pc + 2)),
+            );
             match *opc {
-                LDA => {
-                    // TODO big endian or little endian??
+                // loading from memory into registers
+                LDA | LDX | LDY => {
+                    // TODO: big endian or little endian?
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode);
-                    self.registers.acc = val;
-                    self.registers.s.set_negative(val > 0x7f);
-                    self.registers.s.set_zero(val == 0x00);
-                },
-                LDX => {
+                    self.registers.p.set_zero(val == 0x00);
+                    match *opc {
+                        LDA => self.registers.acc = val,
+                        LDX => self.registers.x = val,
+                        LDY => self.registers.y = val,
+                        _ => unreachable!(),
+                    };
+                    self.registers.p.set_negative(match *opc {
+                        LDX => (val >> 7) == 1,
+                        LDA | LDY => val > 0x7f,
+                        _ => unreachable!(),
+                    });
+                }
+                // storing into memory
+                STA | STX | STY => {
+                    let addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                    self.write(
+                        &addr,
+                        match *opc {
+                            STA => self.registers.acc,
+                            STX => self.registers.x,
+                            STY => self.registers.y,
+                            _ => unreachable!(),
+                        },
+                    );
+                }
+                // transferring between registers
+                TAX | TAY | TXA | TYA | TSX | TXS => {
+                    let val = match *opc {
+                        TAX | TAY => self.registers.acc,
+                        TXA | TXS => self.registers.x,
+                        TYA => self.registers.y,
+                        TSX => self.registers.s,
+                        _ => unreachable!(),
+                    };
+                    match *opc {
+                        TXA | TYA => self.registers.acc = val,
+                        TAX | TSX => self.registers.x = val,
+                        TAY => self.registers.y = val,
+                        TXS => self.registers.s = val,
+                        _ => unreachable!(),
+                    };
+                    self.registers.p.set_negative((val >> 7) == 1);
+                    self.registers.p.set_zero(val == 0);
+                }
+                ADC | SBC => {
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode) as u8;
+                    let (unsigned_result, unsigned_overflow) = match *opc {
+                        ADC => val.overflowing_add(self.registers.acc),
+                        SBC => val.overflowing_sub(self.registers.acc),
+                        _ => unreachable!(),
+                    };
+                    let carry_bit = if *opc == ADC {
+                        self.registers.p.carry()
+                    } else {
+                        !self.registers.p.carry()
+                    } as u8;
+                    self.registers.acc = unsigned_result + carry_bit;
+                    let (signed_result, signed_overflow) = match *opc {
+                        ADC => (val as i8).overflowing_add(self.registers.acc as i8),
+                        SBC => (val as i8).overflowing_sub(self.registers.acc as i8),
+                        _ => unreachable!(),
+                    };
+                    self.registers.p.set_carry(unsigned_overflow);
+                    self.registers.p.set_overflow(signed_overflow);
+                    self.registers.p.set_negative(signed_result < 0);
+                    self.registers.p.set_zero(signed_result == 0);
+                }
+                INC | DEC => {
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode);
-                    self.registers.x = val;
-                    self.registers.s.set_negative((val >> 7) == 1);
-                    self.registers.s.set_zero(val == 0x00);
-                },
-                LDY => {
-                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
-                    self.registers.y = val;
-                    self.registers.s.set_negative(val > 0x7f);
-                    self.registers.s.set_zero(val == 0x00);
+                    let addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                    let result = match *opc {
+                        INC => val.overflowing_add(1).0,
+                        DEC => val.overflowing_sub(1).0,
+                        _ => unreachable!(),
+                    };
+                    self.write(&addr, result);
+                    self.registers.p.set_negative((result >> 7) == 1);
+                    self.registers.p.set_zero(result == 0);
+                }
+                INX | INY | DEX | DEY => {
+                    let reg_ptr = match *opc {
+                        INX | DEX => &mut self.registers.x,
+                        INY | DEY => &mut self.registers.y,
+                        _ => unreachable!(),
+                    };
+                    let result = match *opc {
+                        INX | INY => *reg_ptr + 1,
+                        DEX | DEY => *reg_ptr - 1,
+                        _ => unreachable!(),
+                    };
+                    *reg_ptr = result;
+                    self.registers.p.set_negative((result >> 7) == 1);
+                    self.registers.p.set_zero(result == 0);
                 }
                 _ => unimplemented!(),
             }
