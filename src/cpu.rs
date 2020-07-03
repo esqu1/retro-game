@@ -41,6 +41,16 @@ fn bytes_as_16bit_addr(low_byte: u8, high_byte: u8) -> u16 {
     ((high_byte as u16) << 8) | low_byte as u16
 }
 
+// TODO: write a function that determines number of bytes to advance the program counter by
+fn addr_mode_num_bytes(addr: AddressingMode) -> u8 {
+    use crate::isa::AddressingMode::*;
+    match addr {
+        Imp | Acc => 0,
+        Rel | Imm | Zpg | ZpgX | ZpgY | IndX | IndY => 1,
+        Abs | AbsX | AbsY | Ind => 2,
+    }
+}
+
 pub struct Cpu {
     pub registers: CpuRegs,
     ram: [u8; 0x0800],
@@ -97,6 +107,19 @@ impl Cpu {
         } else {
             panic!("address is out of bounds of CPU memory");
         }
+    }
+
+    fn push(&mut self, val: u8) {
+        self.write(&(self.registers.pc | 0x0100), val);
+        self.registers.pc -= 1;
+    }
+
+    fn pull(&mut self) -> u8 {
+        self.registers.pc += 1;
+        let addr = self.registers.pc | 0x0100;
+        let val = self.read(&addr);
+        self.write(&addr, 0);
+        val
     }
 
     fn get_operand_as_val(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u8 {
@@ -179,7 +202,8 @@ impl Cpu {
         use crate::isa::AddressingMode::*;
         match *addr_mode {
             // An immediate value cannot be used as an address (only an absolute value).
-            Imm | Imp | Rel | Acc => unreachable!(),
+            Imm | Imp | Acc => unreachable!(),
+            Rel => (self.registers.pc as i16 + low_byte as i16) as u16,
             Abs => bytes_as_16bit_addr(low_byte, high_byte),
             AbsX => bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16,
             AbsY => bytes_as_16bit_addr(low_byte, high_byte) + self.registers.y as u16,
@@ -201,7 +225,7 @@ impl Cpu {
         }
     }
 
-    fn execute_instruction(&mut self) {
+    fn execute_instruction(&mut self, skip_bytes: u8) {
         use crate::isa::Opcode::*;
         if let Some((opc, addr_mode, _)) = self.curr_instruction {
             let (byte1, byte2) = (
@@ -225,6 +249,7 @@ impl Cpu {
                         LDA | LDY => val > 0x7f,
                         _ => unreachable!(),
                     });
+                    self.registers.pc += skip_bytes as u16;
                 }
                 // storing into memory
                 STA | STX | STY => {
@@ -238,6 +263,7 @@ impl Cpu {
                             _ => unreachable!(),
                         },
                     );
+                    self.registers.pc += skip_bytes as u16;
                 }
                 // transferring between registers
                 TAX | TAY | TXA | TYA | TSX | TXS => {
@@ -257,6 +283,7 @@ impl Cpu {
                     };
                     self.registers.p.set_negative((val >> 7) == 1);
                     self.registers.p.set_zero(val == 0);
+                    self.registers.pc += skip_bytes as u16;
                 }
                 ADC | SBC => {
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode) as u8;
@@ -280,6 +307,7 @@ impl Cpu {
                     self.registers.p.set_overflow(signed_overflow);
                     self.registers.p.set_negative(signed_result < 0);
                     self.registers.p.set_zero(signed_result == 0);
+                    self.registers.pc += skip_bytes as u16;
                 }
                 INC | DEC => {
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode);
@@ -292,6 +320,7 @@ impl Cpu {
                     self.write(&addr, result);
                     self.registers.p.set_negative((result >> 7) == 1);
                     self.registers.p.set_zero(result == 0);
+                    self.registers.pc += skip_bytes as u16;
                 }
                 INX | INY | DEX | DEY => {
                     let reg_ptr = match *opc {
@@ -307,9 +336,53 @@ impl Cpu {
                     *reg_ptr = result;
                     self.registers.p.set_negative((result >> 7) == 1);
                     self.registers.p.set_zero(result == 0);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                AND | ORA | EOR => {
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
+                    let result = match *opc {
+                        AND => val & self.registers.acc,
+                        ORA => val | self.registers.acc,
+                        EOR => val ^ self.registers.acc,
+                        _ => unreachable!(),
+                    };
+                    self.registers.p.set_negative(result <= 0x7f);
+                    self.registers.p.set_zero(result == 0);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                // BRANCHING INSTRUCTIONS
+                BCS | BCC | BEQ | BMI | BNE | BPL | BVS | BVC => {
+                    let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                    let cond_met = match *opc {
+                        BCS => self.registers.p.carry(),
+                        BCC => !self.registers.p.carry(),
+                        BEQ => self.registers.p.zero(),
+                        BNE => !self.registers.p.zero(),
+                        BMI => self.registers.p.negative(),
+                        BPL => !self.registers.p.negative(),
+                        BVS => self.registers.p.overflow(),
+                        BVC => !self.registers.p.overflow(),
+                        _ => unreachable!(),
+                    };
+                    if cond_met {
+                        self.registers.pc = new_addr;
+                    } else {
+                        self.registers.pc += skip_bytes as u16;
+                    }
+                }
+                JMP => {
+                    let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                    self.registers.pc = new_addr;
+                }
+                JSR => {
+                    self.registers.pc -= 1;
+                    self.push((self.registers.pc >> 8) as u8); // high byte pushed first
+                    self.push((self.registers.pc & 0xff) as u8);
+                    let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                    self.registers.pc = new_addr;
                 }
                 _ => unimplemented!(),
-            }
+            };
         } else {
             panic!("Invalid opcode.")
         }
@@ -319,13 +392,18 @@ impl Cpu {
         if self.cycles_left == 0 {
             // fetch a new instruction, wait appropriate number of cycles
             let opcode = self.read(&self.registers.pc);
+
+            // increment program counter
+            self.registers.pc += 1;
+
             self.curr_instruction = get_instruction(opcode);
             if let Some((_, _, num_cycles)) = self.curr_instruction {
                 self.cycles_left = *num_cycles;
             }
         }
         if self.cycles_left == 1 {
-            self.execute_instruction();
+            let addr_mode = self.curr_instruction.as_ref().unwrap().1;
+            self.execute_instruction(addr_mode_num_bytes(addr_mode));
             self.curr_instruction = &None;
         }
         self.cycles_left -= 1;

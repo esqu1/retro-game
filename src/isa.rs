@@ -66,6 +66,7 @@ pub enum Opcode {
     NOP,
 }
 
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum AddressingMode {
     Abs,
     AbsX,
