@@ -411,8 +411,25 @@ impl Cpu {
                     let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
                     self.registers.pc = new_addr;
                 }
-                RTI => unimplemented!(),
-                RTS => unimplemented!(),
+                RTI => {
+                    self.registers.p.0 = self.pull();
+                    let low_byte = self.pull();
+                    let high_byte = self.pull();
+                    self.registers.pc = self.get_operand_as_dest(
+                        low_byte,
+                        high_byte,
+                        &crate::isa::AddressingMode::Abs,
+                    );
+                }
+                RTS => {
+                    let low_byte = self.pull();
+                    let high_byte = self.pull();
+                    self.registers.pc = self.get_operand_as_dest(
+                        low_byte,
+                        high_byte,
+                        &crate::isa::AddressingMode::Abs,
+                    ) + 1;
+                }
                 CLC => {
                     self.registers.p.set_carry(false);
                     self.registers.pc += skip_bytes as u16;
@@ -470,7 +487,19 @@ impl Cpu {
                     self.registers.s = self.pull();
                     self.registers.pc += skip_bytes as u16;
                 }
-                BRK => unimplemented!(),
+                BRK => {
+                    self.registers.pc += 1;
+                    // push pc
+                    self.push((self.registers.pc >> 8) as u8); // high byte pushed first
+                    self.push((self.registers.pc & 0xff) as u8);
+                    // push p register
+                    self.push(self.registers.p.0); // TODO: is this actually mutated?
+                    // set interrupt flag
+                    self.registers.p.set_interrupt(true);
+                    // load from 0xfffe-0xffff
+                    let new_pc = (self.read(&0xfffe) as u16) | ((self.read(&0xffff) as u16) << 8);
+                    self.registers.pc = new_pc;
+                }
                 NOP => self.registers.pc += skip_bytes as u16,
             };
         } else {
