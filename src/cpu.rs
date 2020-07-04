@@ -350,6 +350,36 @@ impl Cpu {
                     self.registers.p.set_zero(result == 0);
                     self.registers.pc += skip_bytes as u16;
                 }
+                ASL | LSR | ROL | ROR => {
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
+                    let (result, carry) = match *opc {
+                        ASL => (val << 1, val >> 7),
+                        LSR => (val >> 1, val & 0x1),
+                        ROL => ((val << 1) | self.registers.p.carry() as u8, val >> 7),
+                        ROR => (
+                            (val >> 1) | ((self.registers.p.carry() as u8) << 7),
+                            val & 0x1,
+                        ),
+                        _ => unreachable!(),
+                    };
+                    self.registers.p.set_negative((result >> 7) == 1);
+                    self.registers.p.set_zero(result == 0);
+                    self.registers.p.set_carry(carry == 1);
+                    if *addr_mode == crate::isa::AddressingMode::Acc {
+                        self.registers.acc = result;
+                    } else {
+                        let addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                        self.write(&addr, result);
+                    }
+                    self.registers.pc += skip_bytes as u16;
+                }
+                BIT => {
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
+                    self.registers.p.set_negative((val >> 7) == 1);
+                    self.registers.p.set_overflow(((val & 0b1111111) >> 6) == 1);
+                    self.registers.p.set_zero((self.registers.acc & val) == 0);
+                    self.registers.pc += skip_bytes as u16;
+                }
                 // BRANCHING INSTRUCTIONS
                 BCS | BCC | BEQ | BMI | BNE | BPL | BVS | BVC => {
                     let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
@@ -381,7 +411,67 @@ impl Cpu {
                     let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
                     self.registers.pc = new_addr;
                 }
-                _ => unimplemented!(),
+                RTI => unimplemented!(),
+                RTS => unimplemented!(),
+                CLC => {
+                    self.registers.p.set_carry(false);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                CLD => {
+                    self.registers.p.set_decimal(false);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                CLI => {
+                    self.registers.p.set_interrupt(false);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                CLV => {
+                    self.registers.p.set_overflow(false);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                SEC => {
+                    self.registers.p.set_carry(true);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                SED => {
+                    self.registers.p.set_decimal(true);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                SEI => {
+                    self.registers.p.set_interrupt(true);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                CMP | CPX | CPY => {
+                    let orig = match *opc {
+                        CMP => self.registers.acc,
+                        CPX => self.registers.x,
+                        _ => self.registers.y,
+                    };
+                    let val = self.get_operand_as_val(byte1, byte2, addr_mode);
+                    let (result, overflow) = orig.overflowing_sub(val);
+                    self.registers.p.set_negative((result >> 7) == 1);
+                    self.registers.p.set_zero(result == 0);
+                    self.registers.p.set_carry(overflow);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                PHA => {
+                    self.push(self.registers.acc);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                PHP => {
+                    self.push(self.registers.s);
+                    self.registers.pc += skip_bytes as u16;
+                }
+                PLA => {
+                    self.registers.acc = self.pull();
+                    self.registers.pc += skip_bytes as u16;
+                }
+                PLP => {
+                    self.registers.s = self.pull();
+                    self.registers.pc += skip_bytes as u16;
+                }
+                BRK => unimplemented!(),
+                NOP => self.registers.pc += skip_bytes as u16,
             };
         } else {
             panic!("Invalid opcode.")
