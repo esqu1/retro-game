@@ -52,6 +52,7 @@ impl Bus {
 
     // Writes to a location in the CPU memory map.
     pub fn cpu_write(&mut self, addr: &u16, val: u8) {
+        println!("{:x}", addr);
         if *addr < 0x2000 {
             self.cpuRam[(*addr & 0x07ff) as usize] = val;
         } else if *addr < 0x3fff {
@@ -65,6 +66,8 @@ impl Bus {
             unreachable!();
         } else if *addr < 0xffff {
             // write to ROM, is this allowed??
+            // well part of this is the stack... i think?
+            // no, stack lives in 0x0100 to 0x01ff
             unreachable!();
         } else {
             panic!("address is out of bounds of CPU memory");

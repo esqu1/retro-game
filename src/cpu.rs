@@ -58,6 +58,7 @@ pub struct Cpu {
     cycles_left: u8,
     curr_instruction: &'static Option<(Opcode, AddressingMode, u8)>,
     pub bus: Bus,
+    num_cycles: u64,
 }
 
 impl Cpu {
@@ -67,6 +68,7 @@ impl Cpu {
             cycles_left: 0,
             curr_instruction: &None,
             bus,
+            num_cycles: 0,
         }
     }
     pub fn read(&self, addr: &u16) -> u8 {
@@ -477,8 +479,11 @@ impl Cpu {
         }
     }
 
-    pub fn clock(&mut self) {
+    pub fn log(&self) {
+        // format: addr, instr bytes, formatted instr, regs, ppu, cycles
+    }
 
+    pub fn clock(&mut self) {
         println!("{}", self.registers.pc);
         if self.cycles_left == 0 {
             // fetch a new instruction, wait appropriate number of cycles
@@ -499,6 +504,7 @@ impl Cpu {
             self.curr_instruction = &None;
         }
         self.cycles_left -= 1;
+        self.num_cycles += 1;
     }
 }
 
