@@ -1,5 +1,7 @@
+use crate::bus::Bus;
 use crate::isa::*;
 use bitfield::*;
+use std::rc::Rc;
 
 #[allow(dead_code)]
 
@@ -53,60 +55,26 @@ fn addr_mode_num_bytes(addr: AddressingMode) -> u8 {
 
 pub struct Cpu {
     pub registers: CpuRegs,
-    ram: [u8; 0x0800],
     cycles_left: u8,
     curr_instruction: &'static Option<(Opcode, AddressingMode, u8)>,
-    bus: (),
+    pub bus: Bus,
 }
 
 impl Cpu {
-    pub fn init() -> Self {
+    pub fn init(bus: Bus) -> Self {
         Self {
             registers: CpuRegs::init(),
-            ram: [0x0; 0x0800],
             cycles_left: 0,
             curr_instruction: &None,
-            bus: (),
+            bus,
         }
     }
     pub fn read(&self, addr: &u16) -> u8 {
-        if *addr < 0x2000 {
-            self.ram[(*addr & 0x07ff) as usize]
-        } else if *addr < 0x3fff {
-            // read from PPU registers
-            unimplemented!();
-        } else if *addr < 0x4018 {
-            // read from APU or I/O
-            unimplemented!();
-        } else if *addr < 0x401f {
-            // not allowed!
-            unreachable!();
-        } else if *addr < 0xffff {
-            // read the ROM through the mapper
-            unimplemented!();
-        } else {
-            panic!("address is out of bounds of CPU memory");
-        }
+        self.bus.cpu_read(addr)
     }
 
     pub fn write(&mut self, addr: &u16, val: u8) {
-        if *addr < 0x2000 {
-            self.ram[(*addr & 0x07ff) as usize] = val;
-        } else if *addr < 0x3fff {
-            // write to a PPU register
-            unimplemented!();
-        } else if *addr < 0x4018 {
-            // write to APU or I/O
-            unimplemented!();
-        } else if *addr < 0x401f {
-            // not allowed!
-            unreachable!();
-        } else if *addr < 0xffff {
-            // write to ROM, is this allowed??
-            unreachable!();
-        } else {
-            panic!("address is out of bounds of CPU memory");
-        }
+        self.bus.cpu_write(addr, val);
     }
 
     fn push(&mut self, val: u8) {
@@ -229,9 +197,10 @@ impl Cpu {
         use crate::isa::Opcode::*;
         if let Some((opc, addr_mode, _)) = self.curr_instruction {
             let (byte1, byte2) = (
+                self.read(&(self.registers.pc)),
                 self.read(&(self.registers.pc + 1)),
-                self.read(&(self.registers.pc + 2)),
             );
+            println!("{:?}", *opc);
             match *opc {
                 // loading from memory into registers
                 LDA | LDX | LDY => {
@@ -402,6 +371,7 @@ impl Cpu {
                 }
                 JMP => {
                     let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
+                    println!("new addr: {}", new_addr);
                     self.registers.pc = new_addr;
                 }
                 JSR => {
@@ -494,7 +464,7 @@ impl Cpu {
                     self.push((self.registers.pc & 0xff) as u8);
                     // push p register
                     self.push(self.registers.p.0); // TODO: is this actually mutated?
-                    // set interrupt flag
+                                                   // set interrupt flag
                     self.registers.p.set_interrupt(true);
                     // load from 0xfffe-0xffff
                     let new_pc = (self.read(&0xfffe) as u16) | ((self.read(&0xffff) as u16) << 8);
@@ -508,9 +478,12 @@ impl Cpu {
     }
 
     pub fn clock(&mut self) {
+
+        println!("{}", self.registers.pc);
         if self.cycles_left == 0 {
             // fetch a new instruction, wait appropriate number of cycles
             let opcode = self.read(&self.registers.pc);
+            println!("opcode: {:?}", opcode);
 
             // increment program counter
             self.registers.pc += 1;
