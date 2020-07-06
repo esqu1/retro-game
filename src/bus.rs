@@ -1,10 +1,7 @@
-use crate::cpu::Cpu;
 use crate::parser::NesRom;
-use std::boxed::Box;
-use std::rc::Rc;
 pub struct Bus {
     rom: Option<NesRom>,
-    cpuRam: [u8; 0x0800],
+    cpu_ram: [u8; 0x0800],
     ppu: (),
     apu: (),
 }
@@ -13,20 +10,20 @@ impl Bus {
     pub fn init() -> Self {
         Self {
             rom: None,
-            cpuRam: [0x0; 0x0800],
+            cpu_ram: [0x0; 0x0800],
             ppu: (),
             apu: (),
         }
     }
 
-    pub fn installROM(&mut self, rom: NesRom) {
+    pub fn install_rom(&mut self, rom: NesRom) {
         self.rom = Some(rom);
     }
 
     // Reads from the CPU bus.
     pub fn cpu_read(&self, addr: &u16) -> u8 {
         if *addr < 0x2000 {
-            self.cpuRam[(*addr & 0x07ff) as usize]
+            self.cpu_ram[(*addr & 0x07ff) as usize]
         } else if *addr < 0x3fff {
             // read from PPU registers
             unimplemented!();
@@ -52,7 +49,7 @@ impl Bus {
     // Writes to a location in the CPU memory map.
     pub fn cpu_write(&mut self, addr: &u16, val: u8) {
         if *addr < 0x2000 {
-            self.cpuRam[(*addr & 0x07ff) as usize] = val;
+            self.cpu_ram[(*addr & 0x07ff) as usize] = val;
         } else if *addr < 0x3fff {
             // write to a PPU register
             unimplemented!();

@@ -30,11 +30,6 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> Header<T> {
     }
 }
 
-pub struct Instruction {
-    opcode: u8,
-    args: Vec<u8>,
-}
-
 #[derive(Debug)]
 pub struct NesRom {
     pub header: Header<[u8; 12]>,

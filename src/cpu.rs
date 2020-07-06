@@ -1,7 +1,6 @@
 use crate::bus::Bus;
 use crate::isa::*;
 use bitfield::*;
-use std::rc::Rc;
 
 #[allow(dead_code)]
 
@@ -478,7 +477,7 @@ impl Cpu {
                         _ => self.registers.y,
                     };
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode);
-                    let (result, overflow) = orig.overflowing_sub(val);
+                    let result = orig.overflowing_sub(val).0;
                     self.registers.p.set_negative((result >> 7) == 1);
                     self.registers.p.set_zero(result == 0);
                     self.registers.p.set_carry(orig >= val);
@@ -533,7 +532,6 @@ impl Cpu {
             bytes.push(self.read(&p));
             p += 1;
         }
-        let instruction = self.format_to_instr(&bytes);
         println!(
             "{:X}  {}\t{}\t\t\t{} PPU: {},{} CYC: {}",
             self.registers.pc,
