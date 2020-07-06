@@ -400,7 +400,14 @@ impl Cpu {
                         _ => unreachable!(),
                     };
                     if cond_met {
+                        let orig_pc = self.registers.pc;
                         self.registers.pc = new_addr + skip_bytes as u16;
+                        if (orig_pc & 0xff00) == (self.registers.pc & 0xff00) {
+                            // page boundary has not been crossed
+                            self.cycles_left += 1;
+                        } else {
+                            self.cycles_left += 2;
+                        }
                     } else {
                         self.registers.pc += skip_bytes as u16;
                     }
@@ -558,7 +565,7 @@ impl Cpu {
             // increment program counter
             self.registers.pc += 1;
         }
-        if self.cycles_left == 1 {
+        if self.cycles_left == 1 && *self.curr_instruction != None {
             let addr_mode = self.curr_instruction.as_ref().unwrap().1;
             self.execute_instruction(addr_mode_num_bytes(addr_mode));
             self.curr_instruction = &None;
