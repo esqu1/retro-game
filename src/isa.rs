@@ -1,4 +1,6 @@
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+use strum_macros::Display;
+
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Display)]
 pub enum Opcode {
     // Storage
     LDA,
@@ -66,7 +68,7 @@ pub enum Opcode {
     NOP,
 }
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Display)]
 pub enum AddressingMode {
     Abs,
     AbsX,
@@ -145,7 +147,7 @@ pub const OPCODE_MATRIX: [[Option<(Opcode, AddressingMode, u8)>; 0x10]; 0x10] = 
     ],
     [
         Some((BMI, Rel, 2)),
-        Some((RTI, Imp, 6)),
+        Some((AND, IndY, 5)),
         None,
         None,
         None,
@@ -174,7 +176,7 @@ pub const OPCODE_MATRIX: [[Option<(Opcode, AddressingMode, u8)>; 0x10]; 0x10] = 
         Some((EOR, Imm, 2)),
         Some((LSR, Acc, 2)),
         None,
-        Some((JMP, Abs, 6)),
+        Some((JMP, Abs, 3)),
         Some((EOR, Abs, 4)),
         Some((LSR, Abs, 6)),
         None,

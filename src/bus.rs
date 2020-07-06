@@ -4,7 +4,6 @@ use std::boxed::Box;
 use std::rc::Rc;
 pub struct Bus {
     rom: Option<NesRom>,
-
     cpuRam: [u8; 0x0800],
     ppu: (),
     apu: (),
@@ -52,7 +51,6 @@ impl Bus {
 
     // Writes to a location in the CPU memory map.
     pub fn cpu_write(&mut self, addr: &u16, val: u8) {
-        println!("{:x}", addr);
         if *addr < 0x2000 {
             self.cpuRam[(*addr & 0x07ff) as usize] = val;
         } else if *addr < 0x3fff {

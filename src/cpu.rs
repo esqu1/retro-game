@@ -34,8 +34,18 @@ impl CpuRegs {
             y: 0x0,
             pc: 0x8000,
             s: 0xfd,
-            p: StatusFlags(0x34),
+            p: StatusFlags(0x24),
         }
+    }
+}
+
+impl std::fmt::Display for CpuRegs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X}",
+            self.acc, self.x, self.y, self.p.0, self.s
+        )
     }
 }
 
@@ -68,7 +78,7 @@ impl Cpu {
             cycles_left: 0,
             curr_instruction: &None,
             bus,
-            num_cycles: 0,
+            num_cycles: 7,
         }
     }
     pub fn read(&self, addr: &u16) -> u8 {
@@ -80,16 +90,29 @@ impl Cpu {
     }
 
     fn push(&mut self, val: u8) {
-        self.write(&(self.registers.pc | 0x0100), val);
-        self.registers.pc -= 1;
+        self.write(&(self.registers.s as u16 | 0x0100), val);
+        self.registers.s -= 1;
     }
 
     fn pull(&mut self) -> u8 {
-        self.registers.pc += 1;
-        let addr = self.registers.pc | 0x0100;
+        self.registers.s += 1;
+        let addr = (self.registers.s as u16) | 0x0100;
         let val = self.read(&addr);
         self.write(&addr, 0);
         val
+    }
+
+    fn format_to_instr(&self, bytes: &Vec<u8>) -> String {
+        use crate::isa::AddressingMode::*;
+        let opcode = get_instruction(bytes[0]);
+        let operand = match opcode.as_ref().unwrap().1 {
+            Imm => format!("#${:02X}", bytes[1]),
+            Abs => format!("${:02X}{:02X}", bytes[2], bytes[1]),
+            Imp => format!("    "),
+            Rel => format!("    "),
+            _ => format!("    "),
+        };
+        format!("{} {}", opcode.as_ref().unwrap().0.to_string(), operand)
     }
 
     fn get_operand_as_val(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u8 {
@@ -109,12 +132,12 @@ impl Cpu {
             }
             // Add the X register to the zero page address, and discard any overflow.
             ZpgX => {
-                let addr = ((low_byte + self.registers.x) & 0xff) as u16;
+                let addr = ((low_byte.overflowing_add(self.registers.x).0) & 0xff) as u16;
                 self.read(&addr)
             }
             // Same here, except for the Y register.
             ZpgY => {
-                let addr = ((low_byte + self.registers.y) & 0xff) as u16;
+                let addr = ((low_byte.overflowing_add(self.registers.y).0) & 0xff) as u16;
                 self.read(&addr)
             }
             // Just look at the actual address.
@@ -124,14 +147,17 @@ impl Cpu {
             }
             // Absolute address with an X offset.
             AbsX => {
-                let addr =
-                    (bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16) & 0xffff;
+                let addr = (bytes_as_16bit_addr(low_byte, high_byte)
+                    .overflowing_add(self.registers.x as u16))
+                .0 & 0xffff;
                 self.read(&addr)
             }
             // Absolute address with a Y offset.
             AbsY => {
-                let addr =
-                    (bytes_as_16bit_addr(low_byte, high_byte) + self.registers.y as u16) & 0xffff;
+                let addr = (bytes_as_16bit_addr(low_byte, high_byte)
+                    .overflowing_add(self.registers.y as u16)
+                    .0)
+                    & 0xffff;
                 self.read(&addr)
             }
             // Relative addressing to the program counter.
@@ -150,19 +176,19 @@ impl Cpu {
             }
             // Indexes the initial indirection by the X register.
             IndX => {
-                let addr =
-                    (bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16) & 0xffff;
+                let addr = (bytes_as_16bit_addr(low_byte, 0) + self.registers.x as u16) & 0xffff;
+                println!("{:04X}", addr);
                 let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
                 let ind_addr = bytes_as_16bit_addr(ind_addr_low, ind_addr_high);
                 self.read(&ind_addr)
             }
             // Indexes the second indirection by the Y register.
             IndY => {
-                let addr = bytes_as_16bit_addr(low_byte, high_byte);
+                let addr = bytes_as_16bit_addr(low_byte, 0);
                 let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
                 let ind_addr = (bytes_as_16bit_addr(ind_addr_low, ind_addr_high)
-                    + self.registers.y as u16)
-                    & 0xffff;
+                    .overflowing_add(self.registers.y as u16))
+                .0 & 0xffff;
                 self.read(&ind_addr)
             }
         }
@@ -182,16 +208,30 @@ impl Cpu {
                 bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
             }
             IndX => {
-                let addr = bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16;
+                let addr = bytes_as_16bit_addr(low_byte, 0) + self.registers.x as u16;
                 bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
             }
             IndY => {
-                let addr = bytes_as_16bit_addr(low_byte, high_byte);
-                bytes_as_16bit_addr(self.read(&addr), self.read(&addr)) + self.registers.y as u16
+                let addr = bytes_as_16bit_addr(low_byte, 0);
+                bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
+                    .overflowing_add(self.registers.y as u16)
+                    .0
             }
             Zpg => low_byte as u16,
-            ZpgX => (low_byte + self.registers.x) as u16,
-            ZpgY => (low_byte + self.registers.y) as u16,
+            ZpgX => (low_byte.overflowing_add(self.registers.x).0) as u16,
+            ZpgY => (low_byte.overflowing_add(self.registers.y).0) as u16,
+        }
+    }
+
+    fn get_jmp_operand(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u16 {
+        match *addr_mode {
+            AddressingMode::Abs => bytes_as_16bit_addr(low_byte, high_byte),
+            AddressingMode::Ind => {
+                let addr = bytes_as_16bit_addr(low_byte, high_byte);
+                let high = (addr & 0xff00) | (addr + 1) & 0xff;
+                bytes_as_16bit_addr(self.read(&addr), self.read(&high))
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -202,7 +242,6 @@ impl Cpu {
                 self.read(&(self.registers.pc)),
                 self.read(&(self.registers.pc + 1)),
             );
-            println!("{:?}", *opc);
             match *opc {
                 // loading from memory into registers
                 LDA | LDX | LDY => {
@@ -257,27 +296,21 @@ impl Cpu {
                     self.registers.pc += skip_bytes as u16;
                 }
                 ADC | SBC => {
-                    let val = self.get_operand_as_val(byte1, byte2, addr_mode) as u8;
-                    let (unsigned_result, unsigned_overflow) = match *opc {
-                        ADC => val.overflowing_add(self.registers.acc),
-                        SBC => val.overflowing_sub(self.registers.acc),
-                        _ => unreachable!(),
-                    };
-                    let carry_bit = if *opc == ADC {
-                        self.registers.p.carry()
-                    } else {
-                        !self.registers.p.carry()
-                    } as u8;
-                    self.registers.acc = unsigned_result + carry_bit;
-                    let (signed_result, signed_overflow) = match *opc {
-                        ADC => (val as i8).overflowing_add(self.registers.acc as i8),
-                        SBC => (val as i8).overflowing_sub(self.registers.acc as i8),
-                        _ => unreachable!(),
-                    };
-                    self.registers.p.set_carry(unsigned_overflow);
-                    self.registers.p.set_overflow(signed_overflow);
-                    self.registers.p.set_negative(signed_result < 0);
-                    self.registers.p.set_zero(signed_result == 0);
+                    let mut val = self.get_operand_as_val(byte1, byte2, addr_mode) as u8;
+                    if *opc == SBC {
+                        val = !val;
+                    }
+                    let result = (self.registers.acc as u16)
+                        + (val as u16)
+                        + (self.registers.p.carry() as u16);
+                    self.registers.p.set_zero((result & 0x00ff) == 0);
+                    self.registers.p.set_carry(result > 0xff);
+                    self.registers.p.set_overflow(
+                        ((result ^ (self.registers.acc as u16)) & (result ^ (val as u16)) & 0x80)
+                            > 0,
+                    );
+                    self.registers.p.set_negative((result & 0x0080) > 0);
+                    self.registers.acc = (result & 0x00ff) as u8;
                     self.registers.pc += skip_bytes as u16;
                 }
                 INC | DEC => {
@@ -300,8 +333,8 @@ impl Cpu {
                         _ => unreachable!(),
                     };
                     let result = match *opc {
-                        INX | INY => *reg_ptr + 1,
-                        DEX | DEY => *reg_ptr - 1,
+                        INX | INY => (*reg_ptr).overflowing_add(1).0,
+                        DEX | DEY => (*reg_ptr).overflowing_sub(1).0,
                         _ => unreachable!(),
                     };
                     *reg_ptr = result;
@@ -317,7 +350,8 @@ impl Cpu {
                         EOR => val ^ self.registers.acc,
                         _ => unreachable!(),
                     };
-                    self.registers.p.set_negative(result <= 0x7f);
+                    self.registers.acc = result;
+                    self.registers.p.set_negative(result > 0x7f);
                     self.registers.p.set_zero(result == 0);
                     self.registers.pc += skip_bytes as u16;
                 }
@@ -366,18 +400,18 @@ impl Cpu {
                         _ => unreachable!(),
                     };
                     if cond_met {
-                        self.registers.pc = new_addr;
+                        self.registers.pc = new_addr + skip_bytes as u16;
                     } else {
                         self.registers.pc += skip_bytes as u16;
                     }
                 }
                 JMP => {
-                    let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
-                    println!("new addr: {}", new_addr);
+                    let new_addr = self.get_jmp_operand(byte1, byte2, addr_mode);
                     self.registers.pc = new_addr;
                 }
                 JSR => {
                     self.registers.pc -= 1;
+                    self.registers.pc += skip_bytes as u16;
                     self.push((self.registers.pc >> 8) as u8); // high byte pushed first
                     self.push((self.registers.pc & 0xff) as u8);
                     let new_addr = self.get_operand_as_dest(byte1, byte2, addr_mode);
@@ -440,7 +474,8 @@ impl Cpu {
                     let (result, overflow) = orig.overflowing_sub(val);
                     self.registers.p.set_negative((result >> 7) == 1);
                     self.registers.p.set_zero(result == 0);
-                    self.registers.p.set_carry(overflow);
+                    self.registers.p.set_carry(orig >= val);
+
                     self.registers.pc += skip_bytes as u16;
                 }
                 PHA => {
@@ -448,15 +483,19 @@ impl Cpu {
                     self.registers.pc += skip_bytes as u16;
                 }
                 PHP => {
-                    self.push(self.registers.s);
+                    self.push(self.registers.p.0);
                     self.registers.pc += skip_bytes as u16;
                 }
                 PLA => {
                     self.registers.acc = self.pull();
+                    self.registers
+                        .p
+                        .set_negative((self.registers.acc >> 7) == 1);
+                    self.registers.p.set_zero(self.registers.acc == 0);
                     self.registers.pc += skip_bytes as u16;
                 }
                 PLP => {
-                    self.registers.s = self.pull();
+                    self.registers.p.0 = self.pull();
                     self.registers.pc += skip_bytes as u16;
                 }
                 BRK => {
@@ -479,24 +518,45 @@ impl Cpu {
         }
     }
 
-    pub fn log(&self) {
+    pub fn log(&self, num_bytes: u8) {
         // format: addr, instr bytes, formatted instr, regs, ppu, cycles
+        let mut bytes = vec![];
+        let mut p = self.registers.pc.clone();
+        for _ in 0..=num_bytes {
+            bytes.push(self.read(&p));
+            p += 1;
+        }
+        let instruction = self.format_to_instr(&bytes);
+        println!(
+            "{:X}  {}\t{}\t\t\t{} PPU: {},{} CYC: {}",
+            self.registers.pc,
+            bytes
+                .iter()
+                .map(|x| format!("{:02X}", x))
+                .collect::<Vec<String>>()
+                .join(" "),
+            self.format_to_instr(&bytes),
+            self.registers,
+            3 * self.num_cycles / 341,
+            3 * self.num_cycles % 341,
+            self.num_cycles,
+        );
     }
 
     pub fn clock(&mut self) {
-        println!("{}", self.registers.pc);
         if self.cycles_left == 0 {
             // fetch a new instruction, wait appropriate number of cycles
             let opcode = self.read(&self.registers.pc);
-            println!("opcode: {:?}", opcode);
-
-            // increment program counter
-            self.registers.pc += 1;
 
             self.curr_instruction = get_instruction(opcode);
             if let Some((_, _, num_cycles)) = self.curr_instruction {
                 self.cycles_left = *num_cycles;
             }
+            self.log(addr_mode_num_bytes(
+                self.curr_instruction.as_ref().unwrap().1,
+            ));
+            // increment program counter
+            self.registers.pc += 1;
         }
         if self.cycles_left == 1 {
             let addr_mode = self.curr_instruction.as_ref().unwrap().1;
