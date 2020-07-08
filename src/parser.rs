@@ -1,3 +1,4 @@
+use crate::mapper::*;
 use bitfield::*;
 
 const NES_HEADER: [u8; 4] = [0x4e, 0x45, 0x53, 0x1a];
@@ -10,15 +11,15 @@ bitfield! {
     prg_rom_size, _: 7, 0;
     // in 8kb units
     chr_rom_size, _: 15, 8;
-    mirroring, _: 23;
-    battery_backed, _: 22;
-    trainer_presence, _: 21;
-    ignore_mirroring, _: 20;
-    mapper_id_lower_nibble, _: 19, 16;
-    vs_unisystem, _: 31;
-    playchoice10, _: 30;
-    nes20, _: 29, 28;
-    mapper_id_upper_nibble, _: 27, 24;
+    mirroring, _: 16;
+    battery_backed, _: 17;
+    trainer_presence, _: 18;
+    ignore_mirroring, _: 19;
+    mapper_id_lower_nibble, _: 23, 20;
+    vs_unisystem, _: 24;
+    playchoice10, _: 25;
+    nes20, _: 27, 26;
+    mapper_id_upper_nibble, _: 31, 28;
     flags8, _: 39, 32;
     flags9, _: 47, 40;
     flags10, _: 55, 48;
@@ -36,6 +37,7 @@ pub struct NesRom {
     pub trainer: Option<Vec<u8>>,
     pub prg_rom: Vec<u8>,
     pub chr_rom: Vec<u8>,
+    pub mapper: Option<std::rc::Rc<dyn Mapper>>,
 }
 
 impl NesRom {
@@ -45,7 +47,16 @@ impl NesRom {
             trainer: None,
             prg_rom: vec![],
             chr_rom: vec![],
+            mapper: None,
         }
+    }
+
+    pub fn cpu_read(&self, addr: &u16) -> u8 {
+        self.prg_rom[self.mapper.as_ref().unwrap().cpu_map_addr(&addr) as usize]
+    }
+
+    pub fn ppu_read(&self, addr: &u16) -> u8 {
+        self.chr_rom[self.mapper.as_ref().unwrap().ppu_map_addr(&addr) as usize]
     }
 }
 
@@ -60,7 +71,13 @@ where
     let mut header: [u8; 12] = [0; 12];
     let header_from_file: Vec<u8> = file_stream.take(12).collect();
     header.copy_from_slice(&*header_from_file);
-    rom.header = Header(header)
+    rom.header = Header(header);
+
+    // also load the correct mapper
+    rom.mapper = match rom.header.get_mapper_id() {
+        0 => Some(std::rc::Rc::new(Mapper000::new())),
+        _ => unimplemented!(),
+    };
 }
 
 fn read_trainer<I>(file_stream: &mut I, rom: &mut NesRom)
@@ -94,7 +111,7 @@ macro_rules! read_rom_data {
 read_rom_data!(read_prg_rom, prg_rom, prg_rom_size, 0x4000);
 read_rom_data!(read_chr_rom, chr_rom, chr_rom_size, 0x2000);
 
-pub fn read_nesrom(filename: String) -> NesRom {
+pub fn read_nesrom<'a>(filename: String) -> NesRom {
     let mut nesrom = NesRom::new();
     let mut rom_bytes_iter = std::fs::read(filename)
         .expect("Could not read ROM file.")

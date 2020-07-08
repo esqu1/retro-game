@@ -62,16 +62,16 @@ fn addr_mode_num_bytes(addr: AddressingMode) -> u8 {
     }
 }
 
-pub struct Cpu {
+pub struct Cpu<'a, 'b> {
     pub registers: CpuRegs,
     cycles_left: u8,
     curr_instruction: &'static Option<(Opcode, AddressingMode, u8)>,
-    pub bus: Bus,
+    pub bus: Bus<'a, 'b>,
     num_cycles: u64,
 }
 
-impl Cpu {
-    pub fn init(bus: Bus) -> Self {
+impl<'a, 'b> Cpu<'a, 'b> {
+    pub fn init(bus: Bus<'a, 'b>) -> Self {
         Self {
             registers: CpuRegs::init(),
             cycles_left: 0,
@@ -570,6 +570,7 @@ impl Cpu {
         }
         self.cycles_left -= 1;
         self.num_cycles += 1;
+        self.bus.clock();
     }
 }
 

@@ -1,23 +1,29 @@
 use crate::parser::NesRom;
-pub struct Bus {
-    rom: Option<NesRom>,
+use crate::ppu::Ppu;
+pub struct Bus<'a, 'b> {
+    rom: Option<&'b NesRom>,
     cpu_ram: [u8; 0x0800],
-    ppu: (),
+    pub ppu: Ppu<'a>,
     apu: (),
 }
 
-impl Bus {
+impl<'a, 'b> Bus<'a, 'b> {
     pub fn init() -> Self {
         Self {
             rom: None,
             cpu_ram: [0x0; 0x0800],
-            ppu: (),
+            ppu: Ppu::new(),
             apu: (),
         }
     }
 
-    pub fn install_rom(&mut self, rom: NesRom) {
+    pub fn install_rom(&mut self, rom: &'b NesRom)
+    where
+        'b: 'a,
+    {
         self.rom = Some(rom);
+        let rom_ref = self.rom.as_ref().unwrap();
+        self.ppu.rom = Some(rom_ref);
     }
 
     // Reads from the CPU bus.
@@ -36,11 +42,9 @@ impl Bus {
         } else if *addr < 0x8000 {
             // idk
             unimplemented!();
-        } else if *addr < 0xbfff {
-            // read the ROM through the mapper
-            self.rom.as_ref().unwrap().prg_rom[(*addr & 0x3fff) as usize]
         } else if *addr < 0xffff {
-            self.rom.as_ref().unwrap().prg_rom[((*addr - 0x4000) & 0x3fff) as usize]
+            // read ROM through mapper
+            self.rom.as_ref().unwrap().cpu_read(addr)
         } else {
             panic!("address is out of bounds of CPU memory");
         }
@@ -69,5 +73,10 @@ impl Bus {
         }
     }
 
-    pub fn clock(&mut self) {}
+    pub fn clock(&mut self) {
+        // PPU runs 3 times faster than CPU
+        for _ in 0..3 {
+            self.ppu.clock();
+        }
+    }
 }
