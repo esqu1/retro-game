@@ -31,7 +31,7 @@ impl CpuRegs {
             acc: 0x0,
             x: 0x0,
             y: 0x0,
-            pc: 0x8000,
+            pc: 0xC79E,
             s: 0xfd,
             p: StatusFlags(0x24),
         }
@@ -80,7 +80,7 @@ impl<'a, 'b> Cpu<'a, 'b> {
             num_cycles: 7,
         }
     }
-    pub fn read(&self, addr: &u16) -> u8 {
+    pub fn read(&mut self, addr: &u16) -> u8 {
         self.bus.cpu_read(addr)
     }
 
@@ -114,7 +114,12 @@ impl<'a, 'b> Cpu<'a, 'b> {
         format!("{} {}", opcode.as_ref().unwrap().0.to_string(), operand)
     }
 
-    fn get_operand_as_val(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u8 {
+    fn get_operand_as_val(
+        &mut self,
+        low_byte: u8,
+        high_byte: u8,
+        addr_mode: &AddressingMode,
+    ) -> u8 {
         use crate::isa::AddressingMode::*;
         match *addr_mode {
             // Any implied operands should not need to call this function.
@@ -163,7 +168,7 @@ impl<'a, 'b> Cpu<'a, 'b> {
             Rel => {
                 // TODO: add extra cycle for page transition
                 // TODO: check if this is for pc or pc + 1?
-                let addr = ((self.registers.pc as i16) + (low_byte as i16)) as u16;
+                let addr = ((self.registers.pc as i16) + (low_byte as i8 as i16)) as u16;
                 self.read(&addr)
             }
             // Has two layers of indirection; read the address first and then read that address.
@@ -176,7 +181,6 @@ impl<'a, 'b> Cpu<'a, 'b> {
             // Indexes the initial indirection by the X register.
             IndX => {
                 let addr = (bytes_as_16bit_addr(low_byte, 0) + self.registers.x as u16) & 0xffff;
-                println!("{:04X}", addr);
                 let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
                 let ind_addr = bytes_as_16bit_addr(ind_addr_low, ind_addr_high);
                 self.read(&ind_addr)
@@ -193,12 +197,17 @@ impl<'a, 'b> Cpu<'a, 'b> {
         }
     }
 
-    fn get_operand_as_dest(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u16 {
+    fn get_operand_as_dest(
+        &mut self,
+        low_byte: u8,
+        high_byte: u8,
+        addr_mode: &AddressingMode,
+    ) -> u16 {
         use crate::isa::AddressingMode::*;
         match *addr_mode {
             // An immediate value cannot be used as an address (only an absolute value).
             Imm | Imp | Acc => unreachable!(),
-            Rel => (self.registers.pc as i16 + low_byte as i16) as u16,
+            Rel => (self.registers.pc as i16 + low_byte as i8 as i16) as u16,
             Abs => bytes_as_16bit_addr(low_byte, high_byte),
             AbsX => bytes_as_16bit_addr(low_byte, high_byte) + self.registers.x as u16,
             AbsY => bytes_as_16bit_addr(low_byte, high_byte) + self.registers.y as u16,
@@ -222,7 +231,7 @@ impl<'a, 'b> Cpu<'a, 'b> {
         }
     }
 
-    fn get_jmp_operand(&self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u16 {
+    fn get_jmp_operand(&mut self, low_byte: u8, high_byte: u8, addr_mode: &AddressingMode) -> u16 {
         match *addr_mode {
             AddressingMode::Abs => bytes_as_16bit_addr(low_byte, high_byte),
             AddressingMode::Ind => {
@@ -236,11 +245,9 @@ impl<'a, 'b> Cpu<'a, 'b> {
 
     fn execute_instruction(&mut self, skip_bytes: u8) {
         use crate::isa::Opcode::*;
+        let pc = self.registers.pc.clone();
         if let Some((opc, addr_mode, _)) = self.curr_instruction {
-            let (byte1, byte2) = (
-                self.read(&(self.registers.pc)),
-                self.read(&(self.registers.pc + 1)),
-            );
+            let (byte1, byte2) = (self.read(&pc), self.read(&(pc + 1)));
             match *opc {
                 // loading from memory into registers
                 LDA | LDX | LDY => {
@@ -524,7 +531,7 @@ impl<'a, 'b> Cpu<'a, 'b> {
         }
     }
 
-    pub fn log(&self, num_bytes: u8) {
+    pub fn log(&mut self, num_bytes: u8) {
         // format: addr, instr bytes, formatted instr, regs, ppu, cycles
         let mut bytes = vec![];
         let mut p = self.registers.pc.clone();
@@ -551,7 +558,8 @@ impl<'a, 'b> Cpu<'a, 'b> {
     pub fn clock(&mut self) {
         if self.cycles_left == 0 {
             // fetch a new instruction, wait appropriate number of cycles
-            let opcode = self.read(&self.registers.pc);
+            let pc = self.registers.pc.clone();
+            let opcode = self.read(&pc);
 
             self.curr_instruction = get_instruction(opcode);
             if let Some((_, _, num_cycles)) = self.curr_instruction {

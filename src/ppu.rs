@@ -1,26 +1,21 @@
 use crate::rom::NesRom;
 use bitfield::*;
+use sdl2::pixels::Color;
 use sdl2::render::WindowCanvas;
-use std::rc::Rc;
 
-pub struct Color(u8, u8, u8);
+pub struct PaletteColors(Vec<Color>);
 
-// pub const PALETTE_2C02: [Color; 0x10] = [
-//     Color(84, 84, 84),
-//     Color(0, 30, 116),
-//     Color(8, 16, 144),
-//     Color(48, 0, 136),
-//     Color(68, 0, 100),
-//     Color(92, 0, 48),
-//     Color(84, 4, 0),
-//     Color(60, 24, 0),
-//     Color(32, 42, 0),
-//     Color(8, 58, 0),
-//     Color(0, 64, 0),
-//     Color(0, 60, 0),
-//     Color(0, 50, 60),
-//     Color(0, 0, 0),
-// ];
+impl PaletteColors {
+    pub fn from_pal(pal_file: &str) -> Self {
+        let colors = std::fs::read(pal_file).expect("Couldn't open palette file.");
+        Self(
+            colors
+                .chunks(3)
+                .map(|l| Color::RGB(l[0], l[1], l[2]))
+                .collect(),
+        )
+    }
+}
 
 bitfield! {
     pub struct PpuCtrl(u8);
@@ -80,9 +75,10 @@ pub struct Ppu<'a> {
     // vram to store 2 nametables
     vram: [u8; 2048],
     palette: [u8; 0x20],
+    palette_colors: PaletteColors,
     oam_mem: [u8; 256],
     pub rom: Option<&'a NesRom>,
-    pub canvas: Option<&'a WindowCanvas>,
+    pub canvas: Option<&'a mut WindowCanvas>,
     addr_latch: Option<u16>,
     curr_scanline: u16,
     curr_col: u16,
@@ -112,6 +108,7 @@ impl<'a> Ppu<'a> {
             },
             vram: [0; 2048],
             palette: [0; 0x20],
+            palette_colors: PaletteColors::from_pal("ntscpalette.pal"),
             oam_mem: [0; 256],
             rom: None,
             canvas: None,
@@ -133,12 +130,12 @@ impl<'a> Ppu<'a> {
         self.rom = Some(rom);
     }
 
-    pub fn add_canvas(&mut self, canvas: &'a WindowCanvas) {
+    pub fn add_canvas(&mut self, canvas: &'a mut WindowCanvas) {
         self.canvas = Some(canvas);
     }
 
     fn get_operating_pix(&self) -> (u16, u16) {
-        let mut col = self.curr_col + 2;
+        let mut col = self.curr_col + 8;
         let mut row = self.curr_scanline;
         if col > 340 {
             col -= 340;
@@ -147,15 +144,55 @@ impl<'a> Ppu<'a> {
         (row, col)
     }
 
+    fn draw_pixel(&mut self, palette_index: u16, palette_addr: u16) {
+        let color_index = self.read(&(palette_addr + palette_index));
+        let mut canvas = self.canvas.as_deref_mut().unwrap();
+        canvas.set_draw_color(self.palette_colors.0[color_index as usize]);
+        // println!("{:?}", self.palette_colors.0[color_index as usize]);
+        canvas
+            .draw_point(sdl2::rect::Point::new(
+                self.curr_col as i32,
+                self.curr_scanline as i32,
+            ))
+            .expect("Could not write to canvas.");
+    }
+
     pub fn clock(&mut self) {
+        // draw, shift, then replenish
+        // draw
+        // it makes more sense to put the newer one in the lower bits, no?
+        let palette_info =
+            ((self.palette_hi_shift_reg & 0x80) >> 6) | ((self.palette_lo_shift_reg & 0x80) >> 7);
+        let palette_addr = 0x3f01 | ((palette_info as u16) << 2);
+        let pattern_data =
+            ((self.pt_hi_shift_reg & 0x80) >> 6) | ((self.pt_lo_shift_reg & 0x80) >> 7);
+        self.draw_pixel(pattern_data, palette_addr);
+
+        // shift
+        self.palette_hi_shift_reg <<= 1;
+        self.palette_hi_shift_reg |= self.attr_latch >> 1;
+        self.palette_lo_shift_reg <<= 1;
+        self.palette_lo_shift_reg |= self.attr_latch & 1;
+        self.pt_hi_shift_reg <<= 1;
+        self.pt_lo_shift_reg <<= 1;
+
         let col = self.curr_col;
         if col > 0 {
             // this is where the real meat is
             if self.curr_scanline >= 240 {
                 // do nothing, unless we're at (1, 241) at which
                 // we set the VBlank flag
+                if self.curr_scanline == 241 && self.curr_col == 1 {
+                    self.registers.ppu_ctrl.set_vblank_nmi(true);
+                    // TODO: trigger an NMI
+                    self.registers.ppu_status.set_vblank(true);
+                }
+                if self.curr_scanline == 261 && self.curr_col == 1 {
+                    self.registers.ppu_ctrl.set_vblank_nmi(false);
+                    self.registers.ppu_status.set_vblank(false);
+                }
 
-                // oh also, at (1, 261) we should say that the vblank is ended
+            // oh also, at (1, 261) we should say that the vblank is ended
             } else {
                 // between 257 - 320 and 337-340 this scanline does nothing
                 if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
@@ -171,7 +208,14 @@ impl<'a> Ppu<'a> {
                             let row = (self.vram_addr >> 2) & 0x7;
                             let col = (self.vram_addr >> 7) & 0x7;
                             let addr: u16 = (row << 3) as u16 | col as u16 | 0x23c0;
-                            self.attr_latch = self.read(&addr);
+                            // this currently gives the whole byte for a 4x4 tile area
+                            let attr_byte = self.read(&addr);
+                            self.attr_latch = match (row % 32 < 16, col % 32 < 16) {
+                                (true, true) => attr_byte & 0x3,
+                                (true, false) => (attr_byte >> 2) & 0x3,
+                                (false, true) => (attr_byte >> 4) & 0x3,
+                                (false, false) => (attr_byte >> 6) & 0x3,
+                            };
                         }
                         5 => {
                             // fetch low bg tile byte from pattern table
@@ -179,8 +223,7 @@ impl<'a> Ppu<'a> {
                             let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
                                 | ((self.nametable_latch as u16) << 4)
                                 | ((row as u16) % 8);
-                            self.pt_lo_shift_reg =
-                                (self.pt_lo_shift_reg << 8) | self.read(&addr) as u16;
+                            self.pt_lo_shift_reg |= self.read(&addr) as u16;
                         }
                         7 => {
                             // fetch high bg tile byte
@@ -188,8 +231,7 @@ impl<'a> Ppu<'a> {
                             let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
                                 | ((self.nametable_latch as u16) << 4)
                                 | ((row as u16) % 8);
-                            self.pt_hi_shift_reg =
-                                (self.pt_hi_shift_reg << 8) | self.read(&(addr + 8)) as u16;
+                            self.pt_hi_shift_reg |= self.read(&(addr + 8)) as u16;
                         }
                         _ => unreachable!(),
                     }
@@ -251,7 +293,15 @@ impl<'a> Ppu<'a> {
     }
 
     pub fn read(&self, addr: &u16) -> u8 {
-        self.rom.as_ref().unwrap().ppu_read(addr)
+        if *addr <= 0x1fff {
+            self.rom.as_ref().unwrap().ppu_read(addr)
+        } else if *addr <= 0x3eff {
+            self.vram[(*addr & 0xfff) as usize]
+        } else if *addr <= 0x3fff {
+            self.palette[(*addr & 0xff) as usize]
+        } else {
+            panic!("Out of range of PPU memory map");
+        }
     }
 
     pub fn write(&mut self, addr: &u16, val: u8) {

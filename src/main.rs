@@ -16,13 +16,12 @@ use std::io::Write;
 use std::time::Duration;
 
 fn main() {
-    let rom = rom::read_nesrom(String::from("nestest.nes"));
+    let rom = rom::read_nesrom(String::from("donkeykong.nes"));
     println!("{:?}", rom.header);
     let mut bus = Bus::init();
 
     bus.install_rom(&rom);
     let mut cpu = Cpu::init(bus);
-    cpu.registers.pc = 0xc000;
 
     let pat_table = cpu.bus.ppu.pattern_tables_as_matrix();
 
@@ -55,31 +54,33 @@ fn main() {
     let mut canvas = window.into_canvas().build().unwrap();
 
     canvas.set_draw_color(Color::RGB(0, 255, 255));
+
     canvas.clear();
     canvas.present();
-    let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut i = 0;
-    'running: loop {
-        i = (i + 1) % 255;
-        canvas.set_draw_color(Color::RGB(i, 64, 255 - i));
-        canvas.clear();
-        for event in event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
-                _ => {}
-            }
-        }
-        // The rest of the game loop goes here...
+    cpu.bus.add_canvas(&mut canvas);
+    // let mut event_pump = sdl_context.event_pump().unwrap();
+    // let mut i = 0;
+    // 'running: loop {
+    //     i = (i + 1) % 255;
+    //     canvas.set_draw_color(Color::RGB(i, 64, 255 - i));
+    //     canvas.clear();
+    //     for event in event_pump.poll_iter() {
+    //         match event {
+    //             Event::Quit { .. }
+    //             | Event::KeyDown {
+    //                 keycode: Some(Keycode::Escape),
+    //                 ..
+    //             } => break 'running,
+    //             _ => {}
+    //         }
+    //     }
+    //     // The rest of the game loop goes here...
 
-        canvas.present();
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
-    }
-
-    // loop {
-    //     cpu.clock();
+    //     canvas.present();
+    //     ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     // }
+
+    loop {
+        cpu.clock();
+    }
 }
