@@ -557,6 +557,17 @@ impl<'a, 'b> Cpu<'a, 'b> {
 
     pub fn clock(&mut self) {
         if self.cycles_left == 0 {
+            if self.bus.nmi {
+                let pc = self.registers.pc.clone();
+                self.push((pc >> 8) as u8);
+                self.push((pc & 0xff) as u8);
+                self.push(self.registers.p.0);
+                let addr = bytes_as_16bit_addr(self.read(&0xfffa), self.read(&0xfffb));
+                self.registers.pc = addr;
+                self.bus.nmi = false;
+            } else {
+                self.registers.pc = self.registers.pc.clone();
+            }
             // fetch a new instruction, wait appropriate number of cycles
             let pc = self.registers.pc.clone();
             let opcode = self.read(&pc);
@@ -564,10 +575,12 @@ impl<'a, 'b> Cpu<'a, 'b> {
             self.curr_instruction = get_instruction(opcode);
             if let Some((_, _, num_cycles)) = self.curr_instruction {
                 self.cycles_left = *num_cycles;
+            } else {
+                panic!("Invalid instruction reached.");
             }
-            self.log(addr_mode_num_bytes(
-                self.curr_instruction.as_ref().unwrap().1,
-            ));
+            // self.log(addr_mode_num_bytes(
+            //     self.curr_instruction.as_ref().unwrap().1,
+            // ));
             // increment program counter
             self.registers.pc += 1;
         }

@@ -14,10 +14,10 @@ use sdl2::pixels::Color;
 use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
+use std::time::SystemTime;
 
 fn main() {
     let rom = rom::read_nesrom(String::from("donkeykong.nes"));
-    println!("{:?}", rom.header);
     let mut bus = Bus::init();
 
     bus.install_rom(&rom);
@@ -81,6 +81,18 @@ fn main() {
     // }
 
     loop {
-        cpu.clock();
+        let now = SystemTime::now();
+        loop {
+            cpu.clock();
+            if cpu.bus.ppu.curr_scanline == 241 && cpu.bus.ppu.curr_col == 1 {
+                break;
+            }
+        }
+        let length = now.elapsed().unwrap();
+        // println!("vram: {:?}", &cpu.bus.ppu.vram[..]);
+        // println!("palette: {:?}", cpu.bus.ppu.palette);
+        println!("{:?}", length);
+        // let remaining = Duration::new(0, 16666666) - length;
+        // std::thread::sleep(remaining);
     }
 }

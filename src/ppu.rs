@@ -73,15 +73,15 @@ pub struct PpuRegs {
 pub struct Ppu<'a> {
     registers: PpuRegs,
     // vram to store 2 nametables
-    vram: [u8; 2048],
-    palette: [u8; 0x20],
+    pub vram: [u8; 2048],
+    pub palette: [u8; 0x20],
     palette_colors: PaletteColors,
     oam_mem: [u8; 256],
     pub rom: Option<&'a NesRom>,
     pub canvas: Option<&'a mut WindowCanvas>,
     addr_latch: Option<u16>,
-    curr_scanline: u16,
-    curr_col: u16,
+    pub curr_scanline: u16,
+    pub curr_col: u16,
     nametable_latch: u8,
     attr_latch: u8,
     pt_lo_shift_reg: u16,
@@ -90,6 +90,7 @@ pub struct Ppu<'a> {
     palette_hi_shift_reg: u8,
     palette_latch: u8,
     vram_addr: u16,
+    pub nmi: bool,
 }
 
 impl<'a> Ppu<'a> {
@@ -123,6 +124,7 @@ impl<'a> Ppu<'a> {
             palette_hi_shift_reg: 0,
             palette_latch: 0,
             vram_addr: 0x2000, // iterates through the nametable aka the 8x8 tiles
+            nmi: false,
         }
     }
 
@@ -179,21 +181,20 @@ impl<'a> Ppu<'a> {
         let col = self.curr_col;
         if col > 0 {
             // this is where the real meat is
-            if self.curr_scanline >= 240 {
+            if self.curr_scanline >= 240 && self.curr_scanline != 261 {
                 // do nothing, unless we're at (1, 241) at which
                 // we set the VBlank flag
                 if self.curr_scanline == 241 && self.curr_col == 1 {
-                    self.registers.ppu_ctrl.set_vblank_nmi(true);
-                    // TODO: trigger an NMI
                     self.registers.ppu_status.set_vblank(true);
+                    if self.registers.ppu_ctrl.vblank_nmi() {
+                        self.nmi = true;
+                    }
                 }
+            } else {
+                // oh also, at (1, 261) we should say that the vblank is ended
                 if self.curr_scanline == 261 && self.curr_col == 1 {
-                    self.registers.ppu_ctrl.set_vblank_nmi(false);
                     self.registers.ppu_status.set_vblank(false);
                 }
-
-            // oh also, at (1, 261) we should say that the vblank is ended
-            } else {
                 // between 257 - 320 and 337-340 this scanline does nothing
                 if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
                 } else if col % 2 == 1 {
@@ -201,12 +202,14 @@ impl<'a> Ppu<'a> {
                     match self.curr_col % 8 {
                         1 => {
                             // fetch nametable byte
-                            self.nametable_latch = self.read(&self.vram_addr);
+                            let vram_addr = 0x2000 | (col >> 3) | ((self.curr_scanline >> 3) << 5);
+                            self.nametable_latch = self.read(&vram_addr);
                         }
                         3 => {
                             // fetch attr table byte
-                            let row = (self.vram_addr >> 2) & 0x7;
-                            let col = (self.vram_addr >> 7) & 0x7;
+                            let vram_addr = 0x2000 | (col >> 3) | ((self.curr_scanline >> 3) << 5);
+                            let row = (vram_addr >> 2) & 0x7;
+                            let col = (vram_addr >> 7) & 0x7;
                             let addr: u16 = (row << 3) as u16 | col as u16 | 0x23c0;
                             // this currently gives the whole byte for a 4x4 tile area
                             let attr_byte = self.read(&addr);
@@ -241,6 +244,10 @@ impl<'a> Ppu<'a> {
                 }
                 // even columns we rest
             }
+        } else {
+            if self.curr_scanline == 241 {
+                self.canvas.as_deref_mut().unwrap().present();
+            }
         }
         self.curr_col += 1;
         if self.curr_col == 341 {
@@ -270,11 +277,11 @@ impl<'a> Ppu<'a> {
             0x0 => self.registers.ppu_ctrl.0 = val,
             0x1 => self.registers.ppu_mask.0 = val,
             0x2 => self.registers.ppu_status.0 = val,
-            0x3 | 0x4 => unreachable!(), // for now assume unreachability
+            0x3 | 0x4 => {} // for now assume unreachability
             0x5 => self.registers.ppu_scroll = val,
             0x6 => {
                 if let Some(x) = self.addr_latch {
-                    self.addr_latch = Some((x << 2) | (val as u16));
+                    self.addr_latch = Some((x << 8) | (val as u16));
                 } else {
                     self.addr_latch = Some(val as u16);
                 }
@@ -329,7 +336,6 @@ impl<'a> Ppu<'a> {
         let tables: [[u8; 0x1000]; 2] = self.get_pattern_tables();
         let mut matrix1 = [[0; 128]; 128];
 
-        // println!("{:?}", &tables[0][2000..]);
         for r in 0..16 {
             for c in 0..16 {
                 for byte in 0..8 as usize {

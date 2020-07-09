@@ -6,6 +6,7 @@ pub struct Bus<'a, 'b> {
     cpu_ram: [u8; 0x0800],
     pub ppu: Ppu<'a>,
     apu: (),
+    pub nmi: bool,
 }
 
 impl<'a, 'b> Bus<'a, 'b> {
@@ -15,6 +16,7 @@ impl<'a, 'b> Bus<'a, 'b> {
             cpu_ram: [0x0; 0x0800],
             ppu: Ppu::new(),
             apu: (),
+            nmi: false,
         }
     }
 
@@ -40,7 +42,8 @@ impl<'a, 'b> Bus<'a, 'b> {
             self.ppu.cpu_read(&(*addr & 0x7))
         } else if *addr < 0x4018 {
             // read from APU or I/O
-            unimplemented!();
+            // unimplemented!();
+            0
         } else if *addr < 0x401f {
             // not allowed!
             unreachable!();
@@ -63,13 +66,17 @@ impl<'a, 'b> Bus<'a, 'b> {
             // write to a PPU register
             self.ppu.cpu_write(&(*addr & 0x7), val);
         } else if *addr < 0x4018 {
-            // write to APU or I/O
-            unimplemented!();
+            // println!("{:x}", *addr);
+            if *addr == 0x4014 {
+                // OAM DMA register
+            } else {
+                // write to APU or I/O
+                // unimplemented!();
+            }
         } else if *addr < 0x401f {
             // not allowed!
             unreachable!();
         } else if *addr < 0xffff {
-            println!("{}", addr);
             // write to ROM, is this allowed??
             // well part of this is the stack... i think?
             // no, stack lives in 0x0100 to 0x01ff
@@ -83,7 +90,10 @@ impl<'a, 'b> Bus<'a, 'b> {
         // PPU runs 3 times faster than CPU
         for _ in 0..3 {
             self.ppu.clock();
+            if self.ppu.nmi {
+                self.nmi = true;
+                self.ppu.nmi = false;
+            }
         }
-        self.ppu.canvas.as_deref_mut().unwrap().present();
     }
 }
