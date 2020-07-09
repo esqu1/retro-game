@@ -1,5 +1,5 @@
-use crate::parser::NesRom;
 use crate::ppu::Ppu;
+use crate::rom::NesRom;
 pub struct Bus<'a, 'b> {
     rom: Option<&'b NesRom>,
     cpu_ram: [u8; 0x0800],
@@ -56,7 +56,7 @@ impl<'a, 'b> Bus<'a, 'b> {
             self.cpu_ram[(*addr & 0x07ff) as usize] = val;
         } else if *addr < 0x3fff {
             // write to a PPU register
-            unimplemented!();
+            self.ppu.cpu_write(&(*addr & 0x7), val);
         } else if *addr < 0x4018 {
             // write to APU or I/O
             unimplemented!();

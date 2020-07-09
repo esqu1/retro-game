@@ -1,5 +1,6 @@
-use crate::parser::NesRom;
+use crate::rom::NesRom;
 use bitfield::*;
+use sdl2::render::WindowCanvas;
 use std::rc::Rc;
 
 pub struct Color(u8, u8, u8);
@@ -75,17 +76,30 @@ pub struct PpuRegs {
 // palettes from 3f00 to 3f0f for background, 3f10 to 3f1f for sprites
 
 pub struct Ppu<'a> {
-    regs: PpuRegs,
+    registers: PpuRegs,
     // vram to store 2 nametables
     vram: [u8; 2048],
+    palette: [u8; 0x20],
     oam_mem: [u8; 256],
     pub rom: Option<&'a NesRom>,
+    pub canvas: Option<&'a WindowCanvas>,
+    addr_latch: Option<u16>,
+    curr_scanline: u16,
+    curr_col: u16,
+    nametable_latch: u8,
+    attr_latch: u8,
+    pt_lo_shift_reg: u16,
+    pt_hi_shift_reg: u16,
+    palette_lo_shift_reg: u8,
+    palette_hi_shift_reg: u8,
+    palette_latch: u8,
+    vram_addr: u16,
 }
 
 impl<'a> Ppu<'a> {
     pub fn new() -> Self {
         Self {
-            regs: PpuRegs {
+            registers: PpuRegs {
                 ppu_ctrl: PpuCtrl(0),
                 ppu_mask: PpuMask(0),
                 ppu_status: PpuStatus(0),
@@ -97,8 +111,21 @@ impl<'a> Ppu<'a> {
                 oam_dma: 0,
             },
             vram: [0; 2048],
+            palette: [0; 0x20],
             oam_mem: [0; 256],
             rom: None,
+            canvas: None,
+            addr_latch: None,
+            curr_col: 0,
+            curr_scanline: 261,
+            nametable_latch: 0,
+            attr_latch: 0, // i don't think we need this anymore
+            pt_lo_shift_reg: 0,
+            pt_hi_shift_reg: 0,
+            palette_lo_shift_reg: 0,
+            palette_hi_shift_reg: 0,
+            palette_latch: 0,
+            vram_addr: 0x2000, // iterates through the nametable aka the 8x8 tiles
         }
     }
 
@@ -106,10 +133,137 @@ impl<'a> Ppu<'a> {
         self.rom = Some(rom);
     }
 
-    pub fn clock(&mut self) {}
+    pub fn add_canvas(&mut self, canvas: &'a WindowCanvas) {
+        self.canvas = Some(canvas);
+    }
+
+    fn get_operating_pix(&self) -> (u16, u16) {
+        let mut col = self.curr_col + 2;
+        let mut row = self.curr_scanline;
+        if col > 340 {
+            col -= 340;
+            row += 1;
+        }
+        (row, col)
+    }
+
+    pub fn clock(&mut self) {
+        let col = self.curr_col;
+        if col > 0 {
+            // this is where the real meat is
+            if self.curr_scanline >= 240 {
+                // do nothing, unless we're at (1, 241) at which
+                // we set the VBlank flag
+
+                // oh also, at (1, 261) we should say that the vblank is ended
+            } else {
+                // between 257 - 320 and 337-340 this scanline does nothing
+                if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
+                } else if col % 2 == 1 {
+                    // on odd columns, we actually do the dirty work
+                    match self.curr_col % 8 {
+                        1 => {
+                            // fetch nametable byte
+                            self.nametable_latch = self.read(&self.vram_addr);
+                        }
+                        3 => {
+                            // fetch attr table byte
+                            let row = (self.vram_addr >> 2) & 0x7;
+                            let col = (self.vram_addr >> 7) & 0x7;
+                            let addr: u16 = (row << 3) as u16 | col as u16 | 0x23c0;
+                            self.attr_latch = self.read(&addr);
+                        }
+                        5 => {
+                            // fetch low bg tile byte from pattern table
+                            let (row, _) = self.get_operating_pix();
+                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                                | ((self.nametable_latch as u16) << 4)
+                                | ((row as u16) % 8);
+                            self.pt_lo_shift_reg =
+                                (self.pt_lo_shift_reg << 8) | self.read(&addr) as u16;
+                        }
+                        7 => {
+                            // fetch high bg tile byte
+                            let (row, _) = self.get_operating_pix();
+                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                                | ((self.nametable_latch as u16) << 4)
+                                | ((row as u16) % 8);
+                            self.pt_hi_shift_reg =
+                                (self.pt_hi_shift_reg << 8) | self.read(&(addr + 8)) as u16;
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    // eventually, every 8th byte will have to increment the
+                    // scroll or something
+                }
+                // even columns we rest
+            }
+        }
+        self.curr_col += 1;
+        if self.curr_col == 341 {
+            self.curr_scanline = (self.curr_scanline + 1) % 262;
+            self.curr_col = 0;
+        }
+    }
+
+    pub fn cpu_read(&mut self, addr: &u16) -> u8 {
+        match *addr {
+            0x0 => self.registers.ppu_ctrl.0,
+            0x1 => self.registers.ppu_mask.0,
+            0x2 => {
+                self.addr_latch = None;
+                self.registers.ppu_status.0
+            }
+            0x3 | 0x4 => unreachable!(),
+            0x5 => self.registers.ppu_scroll,
+            0x6 => self.registers.ppu_addr,
+            0x7 => self.registers.ppu_data,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn cpu_write(&mut self, addr: &u16, val: u8) {
+        match *addr {
+            0x0 => self.registers.ppu_ctrl.0 = val,
+            0x1 => self.registers.ppu_mask.0 = val,
+            0x2 => self.registers.ppu_status.0 = val,
+            0x3 | 0x4 => unreachable!(), // for now assume unreachability
+            0x5 => self.registers.ppu_scroll = val,
+            0x6 => {
+                if let Some(x) = self.addr_latch {
+                    self.addr_latch = Some((x << 2) | (val as u16));
+                } else {
+                    self.addr_latch = Some(val as u16);
+                }
+                self.registers.ppu_addr = val;
+            }
+            0x7 => {
+                if let Some(x) = self.addr_latch {
+                    self.write(&x, val);
+                    let inc = self.registers.ppu_ctrl.vram_addr_inc();
+                    let inc2 = if inc { 32 } else { 1 };
+                    self.addr_latch = Some(x + inc2);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
 
     pub fn read(&self, addr: &u16) -> u8 {
         self.rom.as_ref().unwrap().ppu_read(addr)
+    }
+
+    pub fn write(&mut self, addr: &u16, val: u8) {
+        if *addr <= 0x1fff {
+            // pattern memory, assume for now it's a rom and is unwritable
+            unreachable!();
+        } else if *addr <= 0x3eff {
+            self.vram[(*addr & 0xfff) as usize] = val;
+        } else if *addr <= 0x3fff {
+            // palette tables
+            self.palette[(*addr & 0xff) as usize] = val;
+        }
     }
 
     pub fn get_pattern_tables(&self) -> [[u8; 0x1000]; 2] {
