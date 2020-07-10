@@ -6,17 +6,19 @@ pub trait Mapper: Debug {
 }
 
 #[derive(Debug)]
-pub struct Mapper000 {}
+pub struct Mapper000 {
+    num_prg: u8,
+}
 
 impl Mapper000 {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(num_prg: u8) -> Self {
+        Self { num_prg }
     }
 }
 
 impl Mapper for Mapper000 {
     fn cpu_map_addr(&self, addr: &u16) -> u16 {
-        *addr & 0x3fff
+        *addr & (if self.num_prg == 1 { 0x3fff } else { 0x7fff })
     }
 
     fn ppu_map_addr(&self, addr: &u16) -> u16 {

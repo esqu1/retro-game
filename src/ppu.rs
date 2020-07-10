@@ -267,18 +267,6 @@ impl<'a> Ppu<'a> {
                 .as_deref_mut()
                 .unwrap()
                 .set_draw_color(sdl2::pixels::Color::RGB(255, 0, 0));
-            self.canvas
-                .as_deref_mut()
-                .unwrap()
-                .draw_rect(sdl2::rect::Rect::new(0, 0, 8, 8));
-            self.canvas
-                .as_deref_mut()
-                .unwrap()
-                .draw_rect(sdl2::rect::Rect::new(64, 32, 32, 32));
-            self.canvas
-                .as_deref_mut()
-                .unwrap()
-                .draw_rect(sdl2::rect::Rect::new(32, 32, 32, 32));
             self.canvas.as_deref_mut().unwrap().present();
         }
 

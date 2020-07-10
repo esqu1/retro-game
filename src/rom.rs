@@ -75,7 +75,7 @@ where
 
     // also load the correct mapper
     rom.mapper = match rom.header.get_mapper_id() {
-        0 => Some(std::rc::Rc::new(Mapper000::new())),
+        0 => Some(std::rc::Rc::new(Mapper000::new(rom.header.prg_rom_size()))),
         _ => unimplemented!(),
     };
 }
