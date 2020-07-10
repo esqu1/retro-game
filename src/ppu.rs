@@ -60,7 +60,7 @@ pub struct PpuRegs {
     ppu_scroll: u8,        // $2005
     ppu_addr: u8,          // $2006
     ppu_data: u8,          // $2007
-    oam_dma: u8,           // $4014
+    pub oam_dma: u8,       // $4014
 }
 
 // 2 pattern tables: 0x0000-0x1fff, 16 bytes for each 8x8 tile
@@ -71,7 +71,7 @@ pub struct PpuRegs {
 // palettes from 3f00 to 3f0f for background, 3f10 to 3f1f for sprites
 
 pub struct Ppu<'a> {
-    registers: PpuRegs,
+    pub registers: PpuRegs,
     // vram to store 2 nametables
     pub vram: [u8; 2048],
     pub palette: [u8; 0x20],
@@ -324,7 +324,7 @@ impl<'a> Ppu<'a> {
         if *addr <= 0x1fff {
             self.rom.as_ref().unwrap().ppu_read(addr)
         } else if *addr <= 0x3eff {
-            self.vram[(*addr & 0xfff) as usize]
+            self.vram[(*addr & 0x7ff) as usize]
         } else if *addr <= 0x3fff {
             self.palette[(*addr & 0xff) as usize]
         } else {
@@ -337,11 +337,15 @@ impl<'a> Ppu<'a> {
             // pattern memory, assume for now it's a rom and is unwritable
             unreachable!();
         } else if *addr <= 0x3eff {
-            self.vram[(*addr & 0xfff) as usize] = val;
+            self.vram[(*addr & 0x7ff) as usize] = val;
         } else if *addr <= 0x3fff {
             // palette tables
             self.palette[(*addr & 0xff) as usize] = val;
         }
+    }
+
+    pub fn oam_write(&mut self, addr: &u8, val: u8) {
+        self.oam_mem[*addr as usize] = val;
     }
 
     pub fn get_pattern_tables(&self) -> [[u8; 0x1000]; 2] {
