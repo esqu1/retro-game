@@ -89,9 +89,7 @@ fn main() {
             }
         }
         let length = now.elapsed().unwrap();
-        // println!("vram: {:?}", &cpu.bus.ppu.vram[..]);
-        // println!("palette: {:?}", cpu.bus.ppu.palette);
-        println!("{:?}", length);
+        // println!("{:?}", length);
         // let remaining = Duration::new(0, 16666666) - length;
         // std::thread::sleep(remaining);
     }

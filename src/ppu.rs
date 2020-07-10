@@ -84,6 +84,8 @@ pub struct Ppu<'a> {
     pub curr_col: u16,
     nametable_latch: u8,
     attr_latch: u8,
+    lo_latch: u8,
+    hi_latch: u8,
     pt_lo_shift_reg: u16,
     pt_hi_shift_reg: u16,
     palette_lo_shift_reg: u8,
@@ -118,6 +120,8 @@ impl<'a> Ppu<'a> {
             curr_scanline: 261,
             nametable_latch: 0,
             attr_latch: 0, // i don't think we need this anymore
+            hi_latch: 0,
+            lo_latch: 0,
             pt_lo_shift_reg: 0,
             pt_hi_shift_reg: 0,
             palette_lo_shift_reg: 0,
@@ -136,8 +140,8 @@ impl<'a> Ppu<'a> {
         self.canvas = Some(canvas);
     }
 
-    fn get_operating_pix(&self) -> (u16, u16) {
-        let mut col = self.curr_col + 8;
+    fn get_operating_pix(&self, offset: u8) -> (u16, u16) {
+        let mut col = self.curr_col + offset as u16;
         let mut row = self.curr_scanline;
         if col > 340 {
             col -= 340;
@@ -148,9 +152,8 @@ impl<'a> Ppu<'a> {
 
     fn draw_pixel(&mut self, palette_index: u16, palette_addr: u16) {
         let color_index = self.read(&(palette_addr + palette_index));
-        let mut canvas = self.canvas.as_deref_mut().unwrap();
+        let canvas = self.canvas.as_deref_mut().unwrap();
         canvas.set_draw_color(self.palette_colors.0[color_index as usize]);
-        // println!("{:?}", self.palette_colors.0[color_index as usize]);
         canvas
             .draw_point(sdl2::rect::Point::new(
                 self.curr_col as i32,
@@ -165,90 +168,120 @@ impl<'a> Ppu<'a> {
         // it makes more sense to put the newer one in the lower bits, no?
         let palette_info =
             ((self.palette_hi_shift_reg & 0x80) >> 6) | ((self.palette_lo_shift_reg & 0x80) >> 7);
-        let palette_addr = 0x3f01 | ((palette_info as u16) << 2);
+        let palette_addr = 0x3f00 | ((palette_info as u16) << 2);
         let pattern_data =
             ((self.pt_hi_shift_reg & 0x80) >> 6) | ((self.pt_lo_shift_reg & 0x80) >> 7);
         self.draw_pixel(pattern_data, palette_addr);
 
-        // shift
-        self.palette_hi_shift_reg <<= 1;
-        self.palette_hi_shift_reg |= self.attr_latch >> 1;
-        self.palette_lo_shift_reg <<= 1;
-        self.palette_lo_shift_reg |= self.attr_latch & 1;
-        self.pt_hi_shift_reg <<= 1;
-        self.pt_lo_shift_reg <<= 1;
-
         let col = self.curr_col;
-        if col > 0 {
-            // this is where the real meat is
-            if self.curr_scanline >= 240 && self.curr_scanline != 261 {
-                // do nothing, unless we're at (1, 241) at which
-                // we set the VBlank flag
-                if self.curr_scanline == 241 && self.curr_col == 1 {
-                    self.registers.ppu_status.set_vblank(true);
-                    if self.registers.ppu_ctrl.vblank_nmi() {
-                        self.nmi = true;
-                    }
+        if col < 337 {
+            // shift
+            self.palette_hi_shift_reg <<= 1;
+            self.palette_lo_shift_reg <<= 1;
+            self.pt_hi_shift_reg <<= 1;
+            self.pt_lo_shift_reg <<= 1;
+        }
+
+        // this is where the real meat is
+        if self.curr_scanline >= 240 && self.curr_scanline != 261 {
+            // do nothing, unless we're at (1, 241) at which
+            // we set the VBlank flag
+            if self.curr_scanline == 241 && col == 1 {
+                self.registers.ppu_status.set_vblank(true);
+                if self.registers.ppu_ctrl.vblank_nmi() {
+                    self.nmi = true;
                 }
-            } else {
-                // oh also, at (1, 261) we should say that the vblank is ended
-                if self.curr_scanline == 261 && self.curr_col == 1 {
-                    self.registers.ppu_status.set_vblank(false);
-                }
-                // between 257 - 320 and 337-340 this scanline does nothing
-                if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
-                } else if col % 2 == 1 {
-                    // on odd columns, we actually do the dirty work
-                    match self.curr_col % 8 {
-                        1 => {
-                            // fetch nametable byte
-                            let vram_addr = 0x2000 | (col >> 3) | ((self.curr_scanline >> 3) << 5);
-                            self.nametable_latch = self.read(&vram_addr);
-                        }
-                        3 => {
-                            // fetch attr table byte
-                            let vram_addr = 0x2000 | (col >> 3) | ((self.curr_scanline >> 3) << 5);
-                            let row = (vram_addr >> 2) & 0x7;
-                            let col = (vram_addr >> 7) & 0x7;
-                            let addr: u16 = (row << 3) as u16 | col as u16 | 0x23c0;
-                            // this currently gives the whole byte for a 4x4 tile area
-                            let attr_byte = self.read(&addr);
-                            self.attr_latch = match (row % 32 < 16, col % 32 < 16) {
-                                (true, true) => attr_byte & 0x3,
-                                (true, false) => (attr_byte >> 2) & 0x3,
-                                (false, true) => (attr_byte >> 4) & 0x3,
-                                (false, false) => (attr_byte >> 6) & 0x3,
-                            };
-                        }
-                        5 => {
-                            // fetch low bg tile byte from pattern table
-                            let (row, _) = self.get_operating_pix();
-                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
-                                | ((self.nametable_latch as u16) << 4)
-                                | ((row as u16) % 8);
-                            self.pt_lo_shift_reg |= self.read(&addr) as u16;
-                        }
-                        7 => {
-                            // fetch high bg tile byte
-                            let (row, _) = self.get_operating_pix();
-                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
-                                | ((self.nametable_latch as u16) << 4)
-                                | ((row as u16) % 8);
-                            self.pt_hi_shift_reg |= self.read(&(addr + 8)) as u16;
-                        }
-                        _ => unreachable!(),
-                    }
-                } else {
-                    // eventually, every 8th byte will have to increment the
-                    // scroll or something
-                }
-                // even columns we rest
             }
         } else {
-            if self.curr_scanline == 241 {
-                self.canvas.as_deref_mut().unwrap().present();
+            // oh also, at (1, 261) we should say that the vblank is ended
+            if self.curr_scanline == 261 && self.curr_col == 1 {
+                self.registers.ppu_status.set_vblank(false);
             }
+            // between 257 - 320 and 337-340 this scanline does nothing
+            if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
+            } else {
+                let end_offset = if col >= 321 && col <= 336 { 5 } else { 0 };
+                // on odd columns, we actually do the dirty work
+                match self.curr_col % 8 {
+                    0 => {
+                        if col != 336 {
+                            // load the shift registers
+                            self.palette_hi_shift_reg =
+                                if (self.attr_latch >> 1) == 1 { 0xff } else { 0 };
+                            self.palette_lo_shift_reg =
+                                if (self.attr_latch & 1) == 1 { 0xff } else { 0 };
+                            self.pt_hi_shift_reg &= 0xff;
+                            self.pt_hi_shift_reg |= self.hi_latch as u16;
+                            self.pt_lo_shift_reg &= 0xff;
+                            self.pt_lo_shift_reg |= self.lo_latch as u16;
+                        }
+                    }
+                    1 => {
+                        // fetch nametable byte
+                        let (px_row, px_col) = self.get_operating_pix(8 + end_offset);
+                        let vram_addr = 0x2000 | (px_col >> 3) | ((px_row >> 3) << 5);
+                        self.nametable_latch = self.read(&vram_addr);
+                    }
+                    3 => {
+                        // fetch attr table byte
+                        let (px_row, px_col) = self.get_operating_pix(6 + end_offset);
+                        let vram_addr = 0x2000 | (px_col >> 3) | ((px_row >> 3) << 5);
+                        let mut row = (vram_addr >> 2) & 0x7;
+                        let mut col = (vram_addr >> 7) & 0x7;
+                        let temp = row;
+                        row = col;
+                        col = temp;
+                        let addr: u16 = (row << 3) as u16 | col as u16 | 0x23c0;
+                        // this currently gives the whole byte for a 4x4 tile area
+                        let attr_byte = self.read(&addr);
+                        self.attr_latch = match (px_row % 32 < 16, px_col % 32 < 16) {
+                            (true, true) => attr_byte & 0x3,
+                            (true, false) => (attr_byte >> 2) & 0x3,
+                            (false, true) => (attr_byte >> 4) & 0x3,
+                            (false, false) => (attr_byte >> 6) & 0x3,
+                        };
+                    }
+                    5 => {
+                        // fetch low bg tile byte from pattern table
+                        let (row, _) = self.get_operating_pix(4 + end_offset);
+                        let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                            | ((self.nametable_latch as u16) << 4)
+                            | ((row as u16) % 8);
+                        self.lo_latch = self.read(&addr);
+                    }
+                    7 => {
+                        // fetch high bg tile byte
+                        let (row, _) = self.get_operating_pix(2 + end_offset);
+                        let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                            | ((self.nametable_latch as u16) << 4)
+                            | ((row as u16) % 8);
+                        self.hi_latch = self.read(&(addr + 8));
+                    }
+                    _ => {}
+                }
+            }
+            // even columns we rest
         }
+        if self.curr_scanline == 241 && col == 0 {
+            self.canvas
+                .as_deref_mut()
+                .unwrap()
+                .set_draw_color(sdl2::pixels::Color::RGB(255, 0, 0));
+            self.canvas
+                .as_deref_mut()
+                .unwrap()
+                .draw_rect(sdl2::rect::Rect::new(0, 0, 8, 8));
+            self.canvas
+                .as_deref_mut()
+                .unwrap()
+                .draw_rect(sdl2::rect::Rect::new(64, 32, 32, 32));
+            self.canvas
+                .as_deref_mut()
+                .unwrap()
+                .draw_rect(sdl2::rect::Rect::new(32, 32, 32, 32));
+            self.canvas.as_deref_mut().unwrap().present();
+        }
+
         self.curr_col += 1;
         if self.curr_col == 341 {
             self.curr_scanline = (self.curr_scanline + 1) % 262;

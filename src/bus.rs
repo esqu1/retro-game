@@ -66,7 +66,6 @@ impl<'a, 'b> Bus<'a, 'b> {
             // write to a PPU register
             self.ppu.cpu_write(&(*addr & 0x7), val);
         } else if *addr < 0x4018 {
-            // println!("{:x}", *addr);
             if *addr == 0x4014 {
                 // OAM DMA register
             } else {

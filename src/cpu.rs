@@ -31,7 +31,7 @@ impl CpuRegs {
             acc: 0x0,
             x: 0x0,
             y: 0x0,
-            pc: 0xC79E,
+            pc: 0x8000,
             s: 0xfd,
             p: StatusFlags(0x24),
         }
@@ -72,13 +72,17 @@ pub struct Cpu<'a, 'b> {
 
 impl<'a, 'b> Cpu<'a, 'b> {
     pub fn init(bus: Bus<'a, 'b>) -> Self {
-        Self {
+        let mut cpu = Self {
             registers: CpuRegs::init(),
             cycles_left: 0,
             curr_instruction: &None,
             bus,
             num_cycles: 7,
-        }
+        };
+        let lo = cpu.read(&0xfffc);
+        let hi = cpu.read(&0xfffd);
+        cpu.registers.pc = bytes_as_16bit_addr(lo, hi);
+        cpu
     }
     pub fn read(&mut self, addr: &u16) -> u8 {
         self.bus.cpu_read(addr)
