@@ -33,7 +33,7 @@ impl CpuRegs {
             y: 0x0,
             pc: 0x8000,
             s: 0xfd,
-            p: StatusFlags(0x24),
+            p: StatusFlags(0x34),
         }
     }
 }
@@ -185,14 +185,16 @@ impl<'a, 'b> Cpu<'a, 'b> {
             // Indexes the initial indirection by the X register.
             IndX => {
                 let addr = (bytes_as_16bit_addr(low_byte, 0) + self.registers.x as u16) & 0xffff;
-                let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
+                let (ind_addr_low, ind_addr_high) =
+                    (self.read(&(addr & 0xff)), self.read(&((addr + 1) & 0xff)));
                 let ind_addr = bytes_as_16bit_addr(ind_addr_low, ind_addr_high);
                 self.read(&ind_addr)
             }
             // Indexes the second indirection by the Y register.
             IndY => {
                 let addr = bytes_as_16bit_addr(low_byte, 0);
-                let (ind_addr_low, ind_addr_high) = (self.read(&addr), self.read(&(addr + 1)));
+                let (ind_addr_low, ind_addr_high) =
+                    (self.read(&addr), self.read(&((addr + 1) & 0xff)));
                 let ind_addr = (bytes_as_16bit_addr(ind_addr_low, ind_addr_high)
                     .overflowing_add(self.registers.y as u16))
                 .0 & 0xffff;
@@ -221,11 +223,11 @@ impl<'a, 'b> Cpu<'a, 'b> {
             }
             IndX => {
                 let addr = bytes_as_16bit_addr(low_byte, 0) + self.registers.x as u16;
-                bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
+                bytes_as_16bit_addr(self.read(&(addr & 0xff)), self.read(&((addr + 1) & 0xff)))
             }
             IndY => {
                 let addr = bytes_as_16bit_addr(low_byte, 0);
-                bytes_as_16bit_addr(self.read(&addr), self.read(&(addr + 1)))
+                bytes_as_16bit_addr(self.read(&addr), self.read(&((addr + 1) & 0xff)))
                     .overflowing_add(self.registers.y as u16)
                     .0
             }
@@ -301,8 +303,10 @@ impl<'a, 'b> Cpu<'a, 'b> {
                         TXS => self.registers.s = val,
                         _ => unreachable!(),
                     };
-                    self.registers.p.set_negative((val >> 7) == 1);
-                    self.registers.p.set_zero(val == 0);
+                    if *opc != TXS {
+                        self.registers.p.set_negative((val >> 7) == 1);
+                        self.registers.p.set_zero(val == 0);
+                    }
                     self.registers.pc += skip_bytes as u16;
                 }
                 ADC | SBC => {
@@ -501,6 +505,7 @@ impl<'a, 'b> Cpu<'a, 'b> {
                 }
                 PHP => {
                     self.push(self.registers.p.0);
+                    self.registers.p.set_bflag(0b10);
                     self.registers.pc += skip_bytes as u16;
                 }
                 PLA => {
@@ -560,42 +565,47 @@ impl<'a, 'b> Cpu<'a, 'b> {
     }
 
     pub fn clock(&mut self) {
-        if self.cycles_left == 0 {
-            if self.bus.nmi {
+        if self.bus.oam_cycles > 0 {
+            self.num_cycles += 1;
+            self.bus.clock();
+        } else {
+            if self.cycles_left == 0 {
+                if self.bus.nmi {
+                    let pc = self.registers.pc.clone();
+                    self.push((pc >> 8) as u8);
+                    self.push((pc & 0xff) as u8);
+                    self.push(self.registers.p.0);
+                    let addr = bytes_as_16bit_addr(self.read(&0xfffa), self.read(&0xfffb));
+                    self.registers.pc = addr;
+                    self.bus.nmi = false;
+                } else {
+                    self.registers.pc = self.registers.pc.clone();
+                }
+                // fetch a new instruction, wait appropriate number of cycles
                 let pc = self.registers.pc.clone();
-                self.push((pc >> 8) as u8);
-                self.push((pc & 0xff) as u8);
-                self.push(self.registers.p.0);
-                let addr = bytes_as_16bit_addr(self.read(&0xfffa), self.read(&0xfffb));
-                self.registers.pc = addr;
-                self.bus.nmi = false;
-            } else {
-                self.registers.pc = self.registers.pc.clone();
-            }
-            // fetch a new instruction, wait appropriate number of cycles
-            let pc = self.registers.pc.clone();
-            let opcode = self.read(&pc);
+                let opcode = self.read(&pc);
 
-            self.curr_instruction = get_instruction(opcode);
-            if let Some((_, _, num_cycles)) = self.curr_instruction {
-                self.cycles_left = *num_cycles;
-            } else {
-                panic!("Invalid instruction reached.");
+                self.curr_instruction = get_instruction(opcode);
+                if let Some((_, _, num_cycles)) = self.curr_instruction {
+                    self.cycles_left = *num_cycles;
+                } else {
+                    panic!("Invalid instruction reached.");
+                }
+                // self.log(addr_mode_num_bytes(
+                //     self.curr_instruction.as_ref().unwrap().1,
+                // ));
+                // increment program counter
+                self.registers.pc += 1;
             }
-            // self.log(addr_mode_num_bytes(
-            //     self.curr_instruction.as_ref().unwrap().1,
-            // ));
-            // increment program counter
-            self.registers.pc += 1;
+            if self.cycles_left == 1 && *self.curr_instruction != None {
+                let addr_mode = self.curr_instruction.as_ref().unwrap().1;
+                self.execute_instruction(addr_mode_num_bytes(addr_mode));
+                self.curr_instruction = &None;
+            }
+            self.cycles_left -= 1;
+            self.num_cycles += 1;
+            self.bus.clock();
         }
-        if self.cycles_left == 1 && *self.curr_instruction != None {
-            let addr_mode = self.curr_instruction.as_ref().unwrap().1;
-            self.execute_instruction(addr_mode_num_bytes(addr_mode));
-            self.curr_instruction = &None;
-        }
-        self.cycles_left -= 1;
-        self.num_cycles += 1;
-        self.bus.clock();
     }
 }
 

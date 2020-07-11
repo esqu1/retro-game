@@ -7,6 +7,13 @@ pub struct Bus<'a, 'b> {
     pub ppu: Ppu<'a>,
     apu: (),
     pub nmi: bool,
+    pub oam_cycles: u16,
+    pub oam_addr_latch: u8, // lower byte pointer of OAM DMA writing
+    oam_dma_data: u8,
+    pub input_controller: [u8; 2],
+    pub input_shift_reg: [u8; 2],
+    pub strobe: bool,
+    button: u8,
 }
 
 impl<'a, 'b> Bus<'a, 'b> {
@@ -17,6 +24,13 @@ impl<'a, 'b> Bus<'a, 'b> {
             ppu: Ppu::new(),
             apu: (),
             nmi: false,
+            oam_cycles: 0,
+            oam_addr_latch: 0,
+            oam_dma_data: 0,
+            input_controller: [0, 0],
+            input_shift_reg: [0, 0],
+            strobe: false,
+            button: 0,
         }
     }
 
@@ -43,7 +57,21 @@ impl<'a, 'b> Bus<'a, 'b> {
         } else if *addr < 0x4018 {
             // read from APU or I/O
             // unimplemented!();
-            0
+            if *addr >= 0x4016 || *addr <= 0x4017 {
+                let button_val = if self.button < 8 {
+                    (self.input_controller[0] & (1 << self.button) != 0) as u8
+                } else {
+                    1
+                };
+                if !self.strobe {
+                    self.button += 1;
+                } else {
+                    self.button = 0;
+                }
+                0x40 | button_val
+            } else {
+                0
+            }
         } else if *addr < 0x401f {
             // not allowed!
             unreachable!();
@@ -67,10 +95,15 @@ impl<'a, 'b> Bus<'a, 'b> {
             self.ppu.cpu_write(&(*addr & 0x7), val);
         } else if *addr < 0x4018 {
             if *addr == 0x4014 {
+                self.ppu.registers.oam_dma = val;
                 // OAM DMA register
-            } else {
+                self.oam_cycles = 513;
+            } else if *addr >= 0x4016 && *addr <= 0x4017 {
                 // write to APU or I/O
-                // unimplemented!();
+                self.strobe = (val & 1) == 1;
+                if self.strobe {
+                    self.button = 0;
+                }
             }
         } else if *addr < 0x401f {
             // not allowed!
@@ -79,6 +112,7 @@ impl<'a, 'b> Bus<'a, 'b> {
             // write to ROM, is this allowed??
             // well part of this is the stack... i think?
             // no, stack lives in 0x0100 to 0x01ff
+            println!("{}", *addr);
             unreachable!();
         } else {
             panic!("address is out of bounds of CPU memory");
@@ -86,6 +120,29 @@ impl<'a, 'b> Bus<'a, 'b> {
     }
 
     pub fn clock(&mut self) {
+        if self.oam_cycles > 0 {
+            if self.oam_cycles <= 512 {
+                if self.oam_cycles % 2 == 0 {
+                    // on even cycles, we read
+                    let high_byte = self.ppu.registers.oam_dma;
+                    let addr = ((high_byte as u16) << 8) | self.oam_addr_latch as u16;
+                    self.oam_dma_data = self.cpu_read(&addr);
+                    // subtract 1 from the y coordinate
+                    if self.oam_cycles % 8 == 0 {
+                        self.oam_dma_data -= 1;
+                    }
+                } else {
+                    // on odd cycles, we write
+                    self.ppu.oam_write(&self.oam_addr_latch, self.oam_dma_data);
+                    if self.oam_addr_latch < 255 {
+                        self.oam_addr_latch += 1;
+                    }
+                }
+            }
+            self.oam_cycles -= 1;
+        } else {
+            self.oam_addr_latch = 0;
+        }
         // PPU runs 3 times faster than CPU
         for _ in 0..3 {
             self.ppu.clock();

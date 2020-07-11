@@ -10,14 +10,17 @@ use crate::cpu::Cpu;
 use sdl2;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
+use sdl2::keyboard::Scancode;
 use sdl2::pixels::Color;
 use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 fn main() {
-    let rom = rom::read_nesrom(String::from("donkeykong.nes"));
+    let nes_name = std::env::args().nth(1).unwrap();
+    let rom = rom::read_nesrom(nes_name);
     let mut bus = Bus::init();
 
     bus.install_rom(&rom);
@@ -58,38 +61,39 @@ fn main() {
     canvas.clear();
     canvas.present();
     cpu.bus.add_canvas(&mut canvas);
-    // let mut event_pump = sdl_context.event_pump().unwrap();
-    // let mut i = 0;
-    // 'running: loop {
-    //     i = (i + 1) % 255;
-    //     canvas.set_draw_color(Color::RGB(i, 64, 255 - i));
-    //     canvas.clear();
-    //     for event in event_pump.poll_iter() {
-    //         match event {
-    //             Event::Quit { .. }
-    //             | Event::KeyDown {
-    //                 keycode: Some(Keycode::Escape),
-    //                 ..
-    //             } => break 'running,
-    //             _ => {}
-    //         }
-    //     }
-    //     // The rest of the game loop goes here...
-
-    //     canvas.present();
-    //     ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
-    // }
-
-    loop {
-        let now = SystemTime::now();
+    let mut event_pump = sdl_context.event_pump().unwrap();
+    'running: loop {
+        let now = Instant::now();
         loop {
             cpu.clock();
             if cpu.bus.ppu.curr_scanline == 241 && cpu.bus.ppu.curr_col == 1 {
                 break;
             }
         }
-        let length = now.elapsed().unwrap();
-        // println!("{:?}", length);
+        let later = Instant::now();
+        cpu.bus.input_controller[0] = 0;
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'running,
+                _ => {}
+            }
+        }
+        for event in event_pump.keyboard_state().pressed_scancodes() {
+            match event {
+                Scancode::F => cpu.bus.input_controller[0] |= 0x1, // A
+                Scancode::D => cpu.bus.input_controller[0] |= 0x2, // B
+                Scancode::U => cpu.bus.input_controller[0] |= 0x4, // Select
+                Scancode::Return => cpu.bus.input_controller[0] |= 0x8, // Start
+                Scancode::Up => cpu.bus.input_controller[0] |= 0x10,
+                Scancode::Down => cpu.bus.input_controller[0] |= 0x20,
+                Scancode::Left => cpu.bus.input_controller[0] |= 0x40,
+                Scancode::Right => cpu.bus.input_controller[0] |= 0x80,
+                _ => {} // },
+            }
+        }
         // let remaining = Duration::new(0, 16666666) - length;
         // std::thread::sleep(remaining);
     }

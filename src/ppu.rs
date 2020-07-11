@@ -53,7 +53,7 @@ bitfield! {
 
 pub struct PpuRegs {
     ppu_ctrl: PpuCtrl,     // $2000
-    ppu_mask: PpuMask,     // $2001
+    pub ppu_mask: PpuMask, // $2001
     ppu_status: PpuStatus, // $2002
     oam_addr: (),          // $2003
     oam_data: (),          // $2004
@@ -77,6 +77,7 @@ pub struct Ppu<'a> {
     pub palette: [u8; 0x20],
     palette_colors: PaletteColors,
     oam_mem: [u8; 256],
+    secondary_oam: [u8; 32],
     pub rom: Option<&'a NesRom>,
     pub canvas: Option<&'a mut WindowCanvas>,
     addr_latch: Option<u16>,
@@ -93,6 +94,15 @@ pub struct Ppu<'a> {
     palette_latch: u8,
     vram_addr: u16,
     pub nmi: bool,
+    sprite_scan_n: u8,
+    sprite_scan_m: u8,
+    secondary_oam_ptr: u8,
+    sprite_eval_cycles: i8,
+    sprite_eval_latch: u8,
+    sprite_hi_shift_reg: [u8; 8],
+    sprite_lo_shift_reg: [u8; 8],
+    sprite_attr_latch: [u8; 8],
+    sprite_x_ctr: [i16; 8],
 }
 
 impl<'a> Ppu<'a> {
@@ -112,7 +122,8 @@ impl<'a> Ppu<'a> {
             vram: [0; 2048],
             palette: [0; 0x20],
             palette_colors: PaletteColors::from_pal("ntscpalette.pal"),
-            oam_mem: [0; 256],
+            oam_mem: [0x0f; 256],
+            secondary_oam: [0xff; 32],
             rom: None,
             canvas: None,
             addr_latch: None,
@@ -129,6 +140,15 @@ impl<'a> Ppu<'a> {
             palette_latch: 0,
             vram_addr: 0x2000, // iterates through the nametable aka the 8x8 tiles
             nmi: false,
+            sprite_scan_n: 0,
+            sprite_scan_m: 0,
+            secondary_oam_ptr: 0,
+            sprite_eval_cycles: 0,
+            sprite_eval_latch: 0,
+            sprite_hi_shift_reg: [0; 8],
+            sprite_lo_shift_reg: [0; 8],
+            sprite_attr_latch: [0; 8],
+            sprite_x_ctr: [0; 8],
         }
     }
 
@@ -163,19 +183,172 @@ impl<'a> Ppu<'a> {
     }
 
     pub fn clock(&mut self) {
-        // draw, shift, then replenish
-        // draw
-        // it makes more sense to put the newer one in the lower bits, no?
-        let palette_info =
-            ((self.palette_hi_shift_reg & 0x80) >> 6) | ((self.palette_lo_shift_reg & 0x80) >> 7);
-        let palette_addr = 0x3f00 | ((palette_info as u16) << 2);
-        let pattern_data =
-            ((self.pt_hi_shift_reg & 0x80) >> 6) | ((self.pt_lo_shift_reg & 0x80) >> 7);
-        self.draw_pixel(pattern_data, palette_addr);
-
         let col = self.curr_col;
+
+        if col == 257 {
+            self.secondary_oam_ptr = 0;
+            self.sprite_scan_n = 0;
+            self.sprite_scan_m = 0;
+            // reset the registers
+            self.sprite_hi_shift_reg = [0; 8];
+            self.sprite_lo_shift_reg = [0; 8];
+            self.sprite_attr_latch = [0; 8];
+            self.sprite_x_ctr = [0xff; 8];
+        }
+
+        // check if we're allowed to render sprites now
+        if self.registers.ppu_mask.show_sprites() {
+            if self.curr_scanline <= 239 {
+                if col >= 1 && col <= 64 && (col % 2 == 1) {
+                    // at the beginning of each scanline, clear secondary OAM
+                    self.secondary_oam_write(&((col as u8) >> 1), 0xff);
+                } else if col >= 65 && col <= 256 {
+                    // sprite evaluation
+                    if self.sprite_scan_n == 64 {
+                    } else if self.secondary_oam_ptr == 32 {
+                        // if we have enough sprites, check to see if there are any more
+                        let potential_overflow =
+                            self.oam_read(&((self.sprite_scan_n << 2) | self.sprite_scan_m));
+                        let height = if self.registers.ppu_ctrl.sprite_size() {
+                            16
+                        } else {
+                            8
+                        };
+                        if self.curr_scanline - (potential_overflow as u16) < height {
+                            // we're in range, set the overflow flag
+                            self.registers.ppu_status.set_sprite_overflow(true);
+                            self.sprite_scan_n = 64;
+                        } else {
+                            self.sprite_scan_m += 1;
+                            if self.sprite_scan_m == 4 {
+                                self.sprite_scan_n += 1;
+                                self.sprite_scan_m = 0;
+                            }
+                        }
+                    } else if self.sprite_eval_cycles == 0 {
+                        let eval_sprite_y = self.oam_read(&(self.sprite_scan_n << 2));
+                        let height = if self.registers.ppu_ctrl.sprite_size() {
+                            16
+                        } else {
+                            8
+                        };
+                        if self.curr_scanline >= (eval_sprite_y as u16)
+                            && self.curr_scanline - (eval_sprite_y as u16) < height
+                        {
+                            self.sprite_eval_cycles += 7;
+                            self.sprite_eval_latch = eval_sprite_y;
+                        } else {
+                            self.sprite_eval_cycles = -1;
+                        }
+                    } else if self.sprite_eval_cycles == -1 {
+                        self.sprite_eval_cycles = 0;
+                        self.sprite_scan_n += 1;
+                    } else {
+                        if col % 2 == 1 {
+                            // read
+                            self.sprite_eval_latch =
+                                self.oam_read(&((self.sprite_scan_n << 2) | self.sprite_scan_m));
+                        } else {
+                            // write
+                            let addr = self.secondary_oam_ptr.clone();
+                            self.secondary_oam_write(&addr, self.sprite_eval_latch);
+                            self.secondary_oam_ptr += 1;
+                            self.sprite_scan_m += 1;
+                            if self.sprite_scan_m == 4 {
+                                self.sprite_scan_n += 1;
+                                self.sprite_scan_m = 0;
+                            }
+                        }
+                        self.sprite_eval_cycles -= 1;
+                    }
+                } else if col >= 257 && col <= 320 {
+                    let n = (((col - 1) % 64) >> 3) as u8;
+                    let sec_oam_addr = n << 2;
+                    // load the shift registers with the sprite palette info
+                    match col % 8 {
+                        1 => {
+                            // load y into the pattern table register for now
+                            self.sprite_hi_shift_reg[n as usize] =
+                                self.secondary_oam_read(&sec_oam_addr);
+                        }
+                        5 => {
+                            // load the pattern table data into the shift registers
+                            let y = self.sprite_hi_shift_reg[n as usize] as u16;
+                            if y != 0xff {
+                                let pt_byte = self.secondary_oam_read(&(sec_oam_addr + 1));
+                                let attr = self.sprite_attr_latch[n as usize];
+                                // let offset = if (attr >> 7) == 1 {
+                                //     7 - (self.curr_scanline - y)
+                                // } else {
+                                //     self.curr_scanline - y
+                                // };
+                                let addr = ((pt_byte as u16) << 4) + (self.curr_scanline - y);
+                                let lo_byte = self.read(&addr);
+                                let hi_byte = self.read(&(addr + 8));
+                                self.sprite_lo_shift_reg[n as usize] = lo_byte;
+                                self.sprite_hi_shift_reg[n as usize] = hi_byte;
+                            }
+                        }
+                        3 => {
+                            // load attribute data
+                            self.sprite_attr_latch[n as usize] =
+                                self.secondary_oam_read(&(sec_oam_addr + 2));
+                        }
+                        7 => {
+                            // load the X coordinate counter to be decremented
+                            self.sprite_x_ctr[n as usize] =
+                                self.secondary_oam_read(&(sec_oam_addr + 3)) as i16;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // draw
+        if col <= 256 && self.curr_scanline <= 239 {
+            let palette_info = ((self.palette_hi_shift_reg & 0x80) >> 6)
+                | ((self.palette_lo_shift_reg & 0x80) >> 7);
+            let palette_addr = 0x3f00 | ((palette_info as u16) << 2);
+            let pattern_data =
+                ((self.pt_hi_shift_reg & 0x80) >> 6) | ((self.pt_lo_shift_reg & 0x80) >> 7);
+            // if self.registers.ppu_mask.show_sprites() {
+            if let Some(top_most_sprite) =
+                self.sprite_x_ctr.iter().position(|x| -7 <= *x && *x <= 0)
+            {
+                let attr = self.sprite_attr_latch[top_most_sprite];
+                // if we were originally going to draw a transparent background,
+                // then priority doesn't matter here
+                if (palette_addr | pattern_data) % 4 == 0 || (attr & 0x20) == 0 {
+                    let palette = 0x3f10 | ((attr & 0x3) << 2) as u16;
+                    let mut new_x = (self.sprite_x_ctr[top_most_sprite] * -1) as u8;
+                    if ((attr >> 6) & 0x1) == 1 {
+                        new_x = 7 - new_x;
+                    }
+                    let lo = (self.sprite_lo_shift_reg[top_most_sprite] >> (7 - new_x)) & 0x1;
+                    let hi = (self.sprite_hi_shift_reg[top_most_sprite] >> (7 - new_x)) & 0x1;
+                    let palette_index = (hi << 1) | lo;
+                    if palette_index == 0 {
+                        self.draw_pixel(pattern_data, palette_addr);
+                    } else {
+                        self.draw_pixel(palette_index as u16, palette);
+                    }
+                // if self.curr_scanline == 127 {
+                // }
+                } else {
+                    self.draw_pixel(pattern_data, palette_addr);
+                }
+            // }
+            } else {
+                self.draw_pixel(pattern_data, palette_addr);
+            }
+            for i in 0..8 {
+                self.sprite_x_ctr[i] -= 1;
+            }
+        }
+
+        // shift
         if col < 337 {
-            // shift
             self.palette_hi_shift_reg <<= 1;
             self.palette_lo_shift_reg <<= 1;
             self.pt_hi_shift_reg <<= 1;
@@ -263,10 +436,6 @@ impl<'a> Ppu<'a> {
             // even columns we rest
         }
         if self.curr_scanline == 241 && col == 0 {
-            self.canvas
-                .as_deref_mut()
-                .unwrap()
-                .set_draw_color(sdl2::pixels::Color::RGB(255, 0, 0));
             self.canvas.as_deref_mut().unwrap().present();
         }
 
@@ -326,8 +495,13 @@ impl<'a> Ppu<'a> {
         } else if *addr <= 0x3eff {
             self.vram[(*addr & 0x7ff) as usize]
         } else if *addr <= 0x3fff {
-            self.palette[(*addr & 0xff) as usize]
+            if *addr % 4 == 0 {
+                self.palette[0]
+            } else {
+                self.palette[(*addr & 0x1f) as usize]
+            }
         } else {
+            println!("{:X}", addr);
             panic!("Out of range of PPU memory map");
         }
     }
@@ -340,12 +514,24 @@ impl<'a> Ppu<'a> {
             self.vram[(*addr & 0x7ff) as usize] = val;
         } else if *addr <= 0x3fff {
             // palette tables
-            self.palette[(*addr & 0xff) as usize] = val;
+            self.palette[(*addr & 0x1f) as usize] = val;
         }
+    }
+
+    fn oam_read(&self, addr: &u8) -> u8 {
+        self.oam_mem[*addr as usize]
     }
 
     pub fn oam_write(&mut self, addr: &u8, val: u8) {
         self.oam_mem[*addr as usize] = val;
+    }
+
+    fn secondary_oam_read(&self, addr: &u8) -> u8 {
+        self.secondary_oam[(*addr & 0x1f) as usize]
+    }
+
+    pub fn secondary_oam_write(&mut self, addr: &u8, val: u8) {
+        self.secondary_oam[(*addr & 0x1f) as usize] = val;
     }
 
     pub fn get_pattern_tables(&self) -> [[u8; 0x1000]; 2] {
