@@ -11,7 +11,7 @@ bitfield! {
     prg_rom_size, _: 7, 0;
     // in 8kb units
     chr_rom_size, _: 15, 8;
-    mirroring, _: 16;
+    pub mirroring, _: 16;
     battery_backed, _: 17;
     trainer_presence, _: 18;
     ignore_mirroring, _: 19;

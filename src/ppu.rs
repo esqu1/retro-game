@@ -81,6 +81,7 @@ pub struct Ppu<'a> {
     pub rom: Option<&'a mut NesRom>,
     pub canvas: Option<&'a mut WindowCanvas>,
     addr_latch: Option<u16>, // latch for the PPUADDR register
+    ppu_data_buffer: u8,     // ppu reads from $2007 are delayed one cycle
     pub curr_scanline: u16,  // current scanline
     pub curr_col: u16,       // column
     pub nmi: bool,           // represents if we want to trigger a nmi
@@ -129,6 +130,7 @@ impl<'a> Ppu<'a> {
             rom: None,
             canvas: None,
             addr_latch: None,
+            ppu_data_buffer: 0,
             curr_col: 0,
             curr_scanline: 261,
             nametable_latch: 0,
@@ -468,7 +470,18 @@ impl<'a> Ppu<'a> {
             0x3 | 0x4 => unreachable!(),
             0x5 => self.registers.ppu_scroll,
             0x6 => self.registers.ppu_addr,
-            0x7 => self.registers.ppu_data,
+            0x7 => {
+                if let Some(x) = self.addr_latch {
+                    let val = self.ppu_data_buffer;
+                    self.ppu_data_buffer = self.read(&x);
+                    let inc = self.registers.ppu_ctrl.vram_addr_inc();
+                    let inc2 = if inc { 32 } else { 1 };
+                    self.addr_latch = Some(x + inc2);
+                    val
+                } else {
+                    0
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -504,7 +517,14 @@ impl<'a> Ppu<'a> {
         if *addr <= 0x1fff {
             self.rom.as_ref().unwrap().ppu_read(addr)
         } else if *addr <= 0x3eff {
-            self.vram[(*addr & 0x7ff) as usize]
+            let vert_mirroring = self.rom.as_ref().unwrap().header.mirroring();
+            if vert_mirroring {
+                // 2800 -> 2000, 2c00 -> 2400
+                self.vram[(*addr & 0x7ff) as usize]
+            } else {
+                // 2400 -> 2000, 2c00 -> 2800
+                self.vram[(*addr & 0xbff) as usize]
+            }
         } else if *addr <= 0x3fff {
             if *addr % 4 == 0 {
                 self.palette[0]
