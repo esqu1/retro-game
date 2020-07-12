@@ -96,11 +96,12 @@ pub struct Ppu<'a> {
     palette_lo_shift_reg: u8, // contains the palette info for drawing bg
     palette_hi_shift_reg: u8, // same
 
-    sprite_scan_n: u8,      // used for scanning through the sprites
-    sprite_scan_m: u8,      // used for scanning through each sprite byte
-    secondary_oam_ptr: u8,  // used for pointing to which secondary oam byte to write to
+    sprite_scan_n: u8,         // used for scanning through the sprites
+    sprite_scan_m: u8,         // used for scanning through each sprite byte
+    secondary_oam_ptr: u8,     // used for pointing to which secondary oam byte to write to
     sprite_eval_cycles: i8, // a ctr for how many more cycles to wait for writing to secondary oam
     sprite_eval_latch: u8,  // for writing across odd and even cycles during secondary OAM writing
+    sprite_zero_sec_oam: bool, // detects the presence of sprite 0 in secondary OAM, for sprite 0 hit
 
     sprite_hi_shift_reg: [u8; 8], // contains the sprites to write next scanline
     sprite_lo_shift_reg: [u8; 8], // same
@@ -147,6 +148,7 @@ impl<'a> Ppu<'a> {
             secondary_oam_ptr: 0,
             sprite_eval_cycles: 0,
             sprite_eval_latch: 0,
+            sprite_zero_sec_oam: false,
             sprite_hi_shift_reg: [0; 8],
             sprite_lo_shift_reg: [0; 8],
             sprite_attr_latch: [0; 8],
@@ -173,10 +175,14 @@ impl<'a> Ppu<'a> {
     }
 
     fn draw_pixel(&mut self, palette_index: u16, palette_addr: u16, is_bg: bool) {
+        let mut new_palette_addr = (palette_addr + palette_index);
+        if new_palette_addr % 4 == 0 {
+            new_palette_addr = 0x3f00;
+        }
         let color_index = if (is_bg && self.registers.ppu_mask.show_bg()) {
-            self.read(&(palette_addr + palette_index))
+            self.read(&new_palette_addr)
         } else {
-            self.read(&(palette_addr + palette_index))
+            self.read(&new_palette_addr)
             // self.read(&0x3f00)
         };
         let canvas = self.canvas.as_deref_mut().unwrap();
@@ -244,6 +250,10 @@ impl<'a> Ppu<'a> {
                         {
                             self.sprite_eval_cycles += 7;
                             self.sprite_eval_latch = eval_sprite_y;
+                            if self.sprite_scan_n == 0 {
+                                // if this is sprite 0, then it will appear first
+                                self.sprite_zero_sec_oam = true;
+                            }
                         } else {
                             self.sprite_eval_cycles = -1;
                         }
@@ -328,17 +338,19 @@ impl<'a> Ppu<'a> {
                     self.sprite_x_ctr.iter().position(|x| -7 <= *x && *x <= 0)
                 {
                     let attr = self.sprite_attr_latch[top_most_sprite];
+                    let mut new_x = (self.sprite_x_ctr[top_most_sprite] * -1) as u8;
+                    // is the sprite flipped horizontally?
+                    if ((attr >> 6) & 0x1) == 1 {
+                        new_x = 7 - new_x;
+                    }
+                    let lo = (self.sprite_lo_shift_reg[top_most_sprite] >> (7 - new_x)) & 0x1;
+                    let hi = (self.sprite_hi_shift_reg[top_most_sprite] >> (7 - new_x)) & 0x1;
+                    let palette_index = (hi << 1) | lo;
                     // if we were originally going to draw a transparent background,
                     // then priority doesn't matter here
                     if (palette_addr | pattern_data) % 4 == 0 || (attr & 0x20) == 0 {
                         let palette = 0x3f10 | ((attr & 0x3) << 2) as u16;
-                        let mut new_x = (self.sprite_x_ctr[top_most_sprite] * -1) as u8;
-                        if ((attr >> 6) & 0x1) == 1 {
-                            new_x = 7 - new_x;
-                        }
-                        let lo = (self.sprite_lo_shift_reg[top_most_sprite] >> (7 - new_x)) & 0x1;
-                        let hi = (self.sprite_hi_shift_reg[top_most_sprite] >> (7 - new_x)) & 0x1;
-                        let palette_index = (hi << 1) | lo;
+
                         if palette_index == 0 {
                             self.draw_pixel(pattern_data, palette_addr, false);
                         } else {
@@ -346,6 +358,15 @@ impl<'a> Ppu<'a> {
                         }
                     } else {
                         self.draw_pixel(pattern_data, palette_addr, true);
+                    }
+                    // sprite pixel is opaque, check to see if background is also opaque;
+                    // if this is sprite 0, then we have a sprite 0 hit
+                    if self.sprite_zero_sec_oam
+                        && top_most_sprite == 0
+                        && palette_index != 0
+                        && (palette_addr | pattern_data) % 4 != 0
+                    {
+                        self.registers.ppu_status.set_sprite_0_hit(true);
                     }
                 } else {
                     self.draw_pixel(pattern_data, palette_addr, true);
@@ -380,6 +401,7 @@ impl<'a> Ppu<'a> {
                 self.registers.ppu_status.set_vblank(false);
                 // clear sprite 0 hit
                 self.registers.ppu_status.set_sprite_0_hit(false);
+                self.sprite_zero_sec_oam = false;
             }
             // between 257 - 320 and 337-340 this scanline does nothing
             if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
@@ -526,11 +548,11 @@ impl<'a> Ppu<'a> {
                 self.vram[(*addr & 0xbff) as usize]
             }
         } else if *addr <= 0x3fff {
-            if *addr % 4 == 0 {
-                self.palette[0]
-            } else {
-                self.palette[(*addr & 0x1f) as usize]
+            let mut palette_index = (*addr & 0x1f) as usize;
+            if *addr % 4 == 0 && *addr >= 0x3f10 {
+                palette_index -= 0x10;
             }
+            self.palette[palette_index]
         } else {
             panic!("Out of range of PPU memory map");
         }
@@ -544,7 +566,11 @@ impl<'a> Ppu<'a> {
             self.vram[(*addr & 0x7ff) as usize] = val;
         } else if *addr <= 0x3fff {
             // palette tables
-            self.palette[(*addr & 0x1f) as usize] = val;
+            let mut palette_index = (*addr & 0x1f) as usize;
+            if *addr % 4 == 0 && *addr >= 0x3f10 {
+                palette_index -= 0x10;
+            }
+            self.palette[palette_index] = val;
         }
     }
 
