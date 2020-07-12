@@ -62,16 +62,16 @@ fn addr_mode_num_bytes(addr: AddressingMode) -> u8 {
     }
 }
 
-pub struct Cpu<'a, 'b> {
+pub struct Cpu<'a> {
     pub registers: CpuRegs,
     cycles_left: u8,
     curr_instruction: &'static Option<(Opcode, AddressingMode, u8)>,
-    pub bus: Bus<'a, 'b>,
+    pub bus: Bus<'a>,
     num_cycles: u64,
 }
 
-impl<'a, 'b> Cpu<'a, 'b> {
-    pub fn init(bus: Bus<'a, 'b>) -> Self {
+impl<'a, 'b> Cpu<'a> {
+    pub fn init(bus: Bus<'a>) -> Self {
         let mut cpu = Self {
             registers: CpuRegs::init(),
             cycles_left: 0,
@@ -101,7 +101,6 @@ impl<'a, 'b> Cpu<'a, 'b> {
         self.registers.s += 1;
         let addr = (self.registers.s as u16) | 0x0100;
         let val = self.read(&addr);
-        self.write(&addr, 0);
         val
     }
 
@@ -505,7 +504,7 @@ impl<'a, 'b> Cpu<'a, 'b> {
                 }
                 PHP => {
                     self.push(self.registers.p.0);
-                    self.registers.p.set_bflag(0b10);
+                    self.registers.p.set_bflag(0b11);
                     self.registers.pc += skip_bytes as u16;
                 }
                 PLA => {

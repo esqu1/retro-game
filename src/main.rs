@@ -20,10 +20,10 @@ use std::time::SystemTime;
 
 fn main() {
     let nes_name = std::env::args().nth(1).unwrap();
-    let rom = rom::read_nesrom(nes_name);
+    let mut rom = rom::read_nesrom(nes_name);
     let mut bus = Bus::init();
 
-    bus.install_rom(&rom);
+    bus.install_rom(&mut rom);
     let mut cpu = Cpu::init(bus);
 
     let pat_table = cpu.bus.ppu.pattern_tables_as_matrix();

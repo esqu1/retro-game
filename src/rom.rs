@@ -45,8 +45,8 @@ impl NesRom {
         NesRom {
             header: Header([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             trainer: None,
-            prg_rom: vec![],
-            chr_rom: vec![],
+            prg_rom: vec![0; 0x4000],
+            chr_rom: vec![0; 0x2000],
             mapper: None,
         }
     }
@@ -55,8 +55,16 @@ impl NesRom {
         self.prg_rom[self.mapper.as_ref().unwrap().cpu_map_addr(&addr) as usize]
     }
 
+    pub fn cpu_write(&mut self, addr: &u16, val: u8) {
+        self.prg_rom[self.mapper.as_ref().unwrap().cpu_map_addr(&addr) as usize] = val;
+    }
+
     pub fn ppu_read(&self, addr: &u16) -> u8 {
         self.chr_rom[self.mapper.as_ref().unwrap().ppu_map_addr(&addr) as usize]
+    }
+
+    pub fn ppu_write(&mut self, addr: &u16, val: u8) {
+        self.chr_rom[self.mapper.as_ref().unwrap().ppu_map_addr(&addr) as usize] = val;
     }
 }
 
@@ -100,10 +108,12 @@ macro_rules! read_rom_data {
         where
             I: Iterator<Item = u8>,
         {
-            let rom_data = file_stream
-                .take($unit_size * rom.header.$size() as usize)
-                .collect();
-            rom.$prop = rom_data;
+            if rom.header.$size() > 0 {
+                let rom_data = file_stream
+                    .take($unit_size * rom.header.$size() as usize)
+                    .collect();
+                rom.$prop = rom_data;
+            }
         }
     };
 }

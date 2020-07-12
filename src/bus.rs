@@ -1,8 +1,8 @@
 use crate::ppu::Ppu;
 use crate::rom::NesRom;
 use sdl2::render::WindowCanvas;
-pub struct Bus<'a, 'b> {
-    rom: Option<&'b NesRom>,
+pub struct Bus<'a> {
+    // rom: Option<&'b NesRom>,
     cpu_ram: [u8; 0x0800],
     pub ppu: Ppu<'a>,
     apu: (),
@@ -16,10 +16,10 @@ pub struct Bus<'a, 'b> {
     button: u8,
 }
 
-impl<'a, 'b> Bus<'a, 'b> {
+impl<'a, 'b> Bus<'a> {
     pub fn init() -> Self {
         Self {
-            rom: None,
+            // rom: None,
             cpu_ram: [0x0; 0x0800],
             ppu: Ppu::new(),
             apu: (),
@@ -34,13 +34,13 @@ impl<'a, 'b> Bus<'a, 'b> {
         }
     }
 
-    pub fn install_rom(&mut self, rom: &'b NesRom)
+    pub fn install_rom(&mut self, rom: &'b mut NesRom)
     where
         'b: 'a,
     {
-        self.rom = Some(rom);
-        let rom_ref = self.rom.as_ref().unwrap();
-        self.ppu.rom = Some(rom_ref);
+        // self.rom = Some(&*rom);
+        // let mut rom_ref = self.rom.unwrap();
+        self.ppu.rom = Some(rom);
     }
 
     pub fn add_canvas(&mut self, canvas: &'a mut WindowCanvas) {
@@ -78,11 +78,9 @@ impl<'a, 'b> Bus<'a, 'b> {
         } else if *addr < 0x8000 {
             // idk
             unimplemented!();
-        } else if *addr <= 0xffff {
-            // read ROM through mapper
-            self.rom.as_ref().unwrap().cpu_read(addr)
         } else {
-            panic!(format!("address {} is out of bounds of CPU memory", *addr));
+            // read ROM through mapper
+            self.ppu.rom.as_ref().unwrap().cpu_read(addr)
         }
     }
 
@@ -110,9 +108,6 @@ impl<'a, 'b> Bus<'a, 'b> {
             unreachable!();
         } else if *addr < 0xffff {
             // write to ROM, is this allowed??
-            // well part of this is the stack... i think?
-            // no, stack lives in 0x0100 to 0x01ff
-            println!("{}", *addr);
             unreachable!();
         } else {
             panic!("address is out of bounds of CPU memory");

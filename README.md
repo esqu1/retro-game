@@ -2,4 +2,8 @@ Rusti-NESs
 ==
 **A NES emulator written in Rust.**
 
-Current status: still in progress! Working on the CPU right now.
+Current TODO's:
+- Implement Sprite 0 hit
+- Scrolling
+- APU
+
