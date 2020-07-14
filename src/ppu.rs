@@ -231,9 +231,11 @@ impl<'a> Ppu<'a> {
         let canvas = self.canvas.as_deref_mut().unwrap();
         canvas.set_draw_color(self.palette_colors.0[color_index as usize]);
         canvas
-            .draw_point(sdl2::rect::Point::new(
-                self.curr_col as i32,
-                self.curr_scanline as i32,
+            .draw_rect(sdl2::rect::Rect::new(
+                2 * self.curr_col as i32,
+                2 * self.curr_scanline as i32,
+                2,
+                2,
             ))
             .expect("Could not write to canvas.");
     }
@@ -703,7 +705,7 @@ impl<'a> Ppu<'a> {
         } else if *addr <= 0x3fff {
             // palette tables
             let mut palette_index = (*addr & 0x1f) as usize;
-            if *addr % 4 == 0 && *addr >= 0x3f10 {
+            if palette_index % 4 == 0 && palette_index >= 0x10 {
                 palette_index -= 0x10;
             }
             self.palette[palette_index] = val;

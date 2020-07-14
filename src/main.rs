@@ -48,7 +48,7 @@ fn main() {
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
     let window = video_subsystem
-        .window("demo", 256, 240)
+        .window("demo", 256 * 2, 240 * 2)
         .position_centered()
         .build()
         .unwrap();

@@ -256,7 +256,6 @@ impl<'a, 'b> Cpu<'a> {
             match *opc {
                 // loading from memory into registers
                 LDA | LDX | LDY => {
-                    // TODO: big endian or little endian?
                     let val = self.get_operand_as_val(byte1, byte2, addr_mode);
                     self.registers.p.set_zero(val == 0x00);
                     match *opc {
