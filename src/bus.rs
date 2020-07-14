@@ -11,6 +11,7 @@ pub struct Bus<'a> {
     pub oam_addr_latch: u8, // lower byte pointer of OAM DMA writing
     oam_dma_data: u8,
     pub input_controller: [u8; 2],
+    second_controller: u8,
     pub input_shift_reg: [u8; 2],
     pub strobe: bool,
     button: u8,
@@ -31,6 +32,7 @@ impl<'a, 'b> Bus<'a> {
             input_shift_reg: [0, 0],
             strobe: false,
             button: 0,
+            second_controller: 0,
         }
     }
 
@@ -58,17 +60,23 @@ impl<'a, 'b> Bus<'a> {
             // read from APU or I/O
             // unimplemented!();
             if *addr >= 0x4016 || *addr <= 0x4017 {
-                let button_val = if self.button < 8 {
-                    (self.input_controller[0] & (1 << self.button) != 0) as u8
+                if *addr == 0x4017 {
+                    // not implementing second controller now
+                    (self.second_controller >= 8) as u8
                 } else {
-                    1
-                };
-                if !self.strobe {
-                    self.button += 1;
-                } else {
-                    self.button = 0;
+                    let button_val = if self.button < 8 {
+                        (self.input_controller[(*addr & 1) as usize] & (1 << self.button) != 0)
+                            as u8
+                    } else {
+                        1
+                    };
+                    if !self.strobe {
+                        self.button += 1;
+                    } else {
+                        self.button = 0;
+                    }
+                    0x40 | button_val
                 }
-                0x40 | button_val
             } else {
                 0
             }
@@ -96,7 +104,7 @@ impl<'a, 'b> Bus<'a> {
                 self.ppu.registers.oam_dma = val;
                 // OAM DMA register
                 self.oam_cycles = 513;
-            } else if *addr >= 0x4016 && *addr <= 0x4017 {
+            } else if *addr == 0x4016 {
                 // write to APU or I/O
                 self.strobe = (val & 1) == 1;
                 if self.strobe {
@@ -123,7 +131,7 @@ impl<'a, 'b> Bus<'a> {
                     let addr = ((high_byte as u16) << 8) | self.oam_addr_latch as u16;
                     self.oam_dma_data = self.cpu_read(&addr);
                     // subtract 1 from the y coordinate
-                    if self.oam_cycles % 8 == 0 {
+                    if self.oam_cycles % 8 == 0 && self.oam_dma_data != 0 {
                         self.oam_dma_data -= 1;
                     }
                 } else {

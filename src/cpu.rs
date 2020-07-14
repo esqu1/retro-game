@@ -525,8 +525,8 @@ impl<'a, 'b> Cpu<'a> {
                     self.push((self.registers.pc >> 8) as u8); // high byte pushed first
                     self.push((self.registers.pc & 0xff) as u8);
                     // push p register
-                    self.push(self.registers.p.0); // TODO: is this actually mutated?
-                                                   // set interrupt flag
+                    self.push(self.registers.p.0);
+                    // set interrupt flag
                     self.registers.p.set_interrupt(true);
                     // load from 0xfffe-0xffff
                     let new_pc = (self.read(&0xfffe) as u16) | ((self.read(&0xffff) as u16) << 8);

@@ -16,7 +16,6 @@ use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
 
 fn main() {
     let nes_name = std::env::args().nth(1).unwrap();
@@ -71,6 +70,8 @@ fn main() {
             }
         }
         let later = Instant::now();
+        let length = later - now;
+        println!("time for frame: {:?}", length);
         cpu.bus.input_controller[0] = 0;
         for event in event_pump.poll_iter() {
             match event {
@@ -94,7 +95,10 @@ fn main() {
                 _ => {} // },
             }
         }
-        // let remaining = Duration::new(0, 16666666) - length;
-        // std::thread::sleep(remaining);
+        let locked_fps = Duration::new(0, 30000000);
+        if locked_fps > length {
+            let remaining = Duration::new(0, 30000000) - length;
+            std::thread::sleep(remaining);
+        }
     }
 }

@@ -51,15 +51,74 @@ bitfield! {
     vblank, set_vblank: 7;
 }
 
+bitfield! {
+    pub struct VRamAddr(u16);
+    impl Debug;
+    coarse_x, set_coarse_x: 4, 0;
+    coarse_y, set_coarse_y: 9, 5;
+    nametable, set_nametable: 11,10;
+    fine_y, set_fine_y: 14, 12;
+}
+
+impl VRamAddr {
+    fn new() -> Self {
+        Self(0)
+    }
+}
+
+pub struct ScrollRegisters {
+    vram_addr: VRamAddr,
+    temp_vram_addr: VRamAddr,
+    fine_x: u8,
+    w: bool,
+}
+
+impl ScrollRegisters {
+    fn new() -> Self {
+        Self {
+            vram_addr: VRamAddr::new(),
+            temp_vram_addr: VRamAddr::new(),
+            fine_x: 0,
+            w: false,
+        }
+    }
+
+    // From http://wiki.nesdev.com/w/index.php/PPU_scrolling
+    fn inc_coarse_x(&mut self) {
+        if (self.vram_addr.0 & 0x1f) == 31 {
+            self.vram_addr.0 &= !0x001f;
+            self.vram_addr.0 ^= 0x0400;
+        } else {
+            self.vram_addr.0 += 1;
+        }
+    }
+
+    // From http://wiki.nesdev.com/w/index.php/PPU_scrolling
+    fn inc_fine_y(&mut self) {
+        if (self.vram_addr.0 & 0x7000) != 0x7000 {
+            self.vram_addr.0 += 0x1000;
+        } else {
+            self.vram_addr.0 &= !0x7000;
+            let mut y = (self.vram_addr.0 & 0x3e0) >> 5;
+            if y == 29 {
+                y = 0;
+                self.vram_addr.0 ^= 0x0800;
+            } else if y == 31 {
+                y = 0;
+            } else {
+                y += 1;
+            }
+            self.vram_addr.0 = (self.vram_addr.0 & !0x03e0) | (y << 5);
+        }
+    }
+}
+
 pub struct PpuRegs {
     ppu_ctrl: PpuCtrl,     // $2000
     pub ppu_mask: PpuMask, // $2001
     ppu_status: PpuStatus, // $2002
     oam_addr: (),          // $2003
     oam_data: (),          // $2004
-    ppu_scroll: u8,        // $2005
-    ppu_addr: u8,          // $2006
-    ppu_data: u8,          // $2007
     pub oam_dma: u8,       // $4014
 }
 
@@ -80,11 +139,12 @@ pub struct Ppu<'a> {
     secondary_oam: [u8; 32],
     pub rom: Option<&'a mut NesRom>,
     pub canvas: Option<&'a mut WindowCanvas>,
-    addr_latch: Option<u16>, // latch for the PPUADDR register
-    ppu_data_buffer: u8,     // ppu reads from $2007 are delayed one cycle
-    pub curr_scanline: u16,  // current scanline
-    pub curr_col: u16,       // column
-    pub nmi: bool,           // represents if we want to trigger a nmi
+    ppu_data_buffer: u8,    // ppu reads from $2007 are delayed one cycle
+    pub curr_scanline: u16, // current scanline
+    pub curr_col: u16,      // column
+    pub nmi: bool,          // represents if we want to trigger a nmi
+    addr_latch: Option<u16>,
+    scroll_regs: ScrollRegisters,
 
     nametable_latch: u8, // saves a pattern table address from nametable, for bg rendering
     attr_latch: u8,      // stores attribute table latch
@@ -93,8 +153,8 @@ pub struct Ppu<'a> {
 
     pt_lo_shift_reg: u16, // for drawing from pt, contains data for next two tiles
     pt_hi_shift_reg: u16, // same here
-    palette_lo_shift_reg: u8, // contains the palette info for drawing bg
-    palette_hi_shift_reg: u8, // same
+    palette_lo_shift_reg: u16, // contains the palette info for drawing bg
+    palette_hi_shift_reg: u16, // same
 
     sprite_scan_n: u8,         // used for scanning through the sprites
     sprite_scan_m: u8,         // used for scanning through each sprite byte
@@ -118,9 +178,6 @@ impl<'a> Ppu<'a> {
                 ppu_status: PpuStatus(0),
                 oam_addr: (),
                 oam_data: (),
-                ppu_scroll: 0,
-                ppu_addr: 0,
-                ppu_data: 0,
                 oam_dma: 0,
             },
             vram: [0; 2048],
@@ -130,11 +187,11 @@ impl<'a> Ppu<'a> {
             secondary_oam: [0xff; 32],
             rom: None,
             canvas: None,
-            addr_latch: None,
             ppu_data_buffer: 0,
             curr_col: 0,
             curr_scanline: 261,
             nametable_latch: 0,
+            addr_latch: None,
             attr_latch: 0, // i don't think we need this anymore
             hi_latch: 0,
             lo_latch: 0,
@@ -143,6 +200,7 @@ impl<'a> Ppu<'a> {
             palette_lo_shift_reg: 0,
             palette_hi_shift_reg: 0,
             nmi: false,
+            scroll_regs: ScrollRegisters::new(),
             sprite_scan_n: 0,
             sprite_scan_m: 0,
             secondary_oam_ptr: 0,
@@ -164,27 +222,12 @@ impl<'a> Ppu<'a> {
         self.canvas = Some(canvas);
     }
 
-    fn get_operating_pix(&self, offset: u8) -> (u16, u16) {
-        let mut col = self.curr_col + offset as u16;
-        let mut row = self.curr_scanline;
-        if col > 340 {
-            col -= 340;
-            row += 1;
-        }
-        (row, col)
-    }
-
-    fn draw_pixel(&mut self, palette_index: u16, palette_addr: u16, is_bg: bool) {
-        let mut new_palette_addr = (palette_addr + palette_index);
+    fn draw_pixel(&mut self, palette_index: u16, palette_addr: u16) {
+        let mut new_palette_addr = palette_addr + palette_index;
         if new_palette_addr % 4 == 0 {
             new_palette_addr = 0x3f00;
         }
-        let color_index = if (is_bg && self.registers.ppu_mask.show_bg()) {
-            self.read(&new_palette_addr)
-        } else {
-            self.read(&new_palette_addr)
-            // self.read(&0x3f00)
-        };
+        let color_index = self.read(&new_palette_addr);
         let canvas = self.canvas.as_deref_mut().unwrap();
         canvas.set_draw_color(self.palette_colors.0[color_index as usize]);
         canvas
@@ -326,13 +369,16 @@ impl<'a> Ppu<'a> {
         // DRAWING
         ////////////
         if col <= 256 && self.curr_scanline <= 239 {
-            let palette_info = ((self.palette_hi_shift_reg & 0x80) >> 6)
-                | ((self.palette_lo_shift_reg & 0x80) >> 7);
+            let fine_x = self.scroll_regs.fine_x;
+            let palette_info = ((self.palette_hi_shift_reg >> (14 - fine_x)) & 0x2)
+                | ((self.palette_lo_shift_reg >> (15 - fine_x)) & 1);
             let palette_addr = 0x3f00 | ((palette_info as u16) << 2);
-            let pattern_data =
-                ((self.pt_hi_shift_reg & 0x80) >> 6) | ((self.pt_lo_shift_reg & 0x80) >> 7);
+
+            // select bit of pattern table based on fine_x scroll
+            let pattern_data = ((self.pt_hi_shift_reg >> (14 - fine_x)) & 0x2)
+                | ((self.pt_lo_shift_reg >> (15 - fine_x)) & 1);
             if !self.registers.ppu_mask.show_sprites() {
-                self.draw_pixel(pattern_data, palette_addr, true);
+                self.draw_pixel(pattern_data, palette_addr);
             } else {
                 if let Some(top_most_sprite) =
                     self.sprite_x_ctr.iter().position(|x| -7 <= *x && *x <= 0)
@@ -352,12 +398,12 @@ impl<'a> Ppu<'a> {
                         let palette = 0x3f10 | ((attr & 0x3) << 2) as u16;
 
                         if palette_index == 0 {
-                            self.draw_pixel(pattern_data, palette_addr, false);
+                            self.draw_pixel(pattern_data, palette_addr);
                         } else {
-                            self.draw_pixel(palette_index as u16, palette, true);
+                            self.draw_pixel(palette_index as u16, palette);
                         }
                     } else {
-                        self.draw_pixel(pattern_data, palette_addr, true);
+                        self.draw_pixel(pattern_data, palette_addr);
                     }
                     // sprite pixel is opaque, check to see if background is also opaque;
                     // if this is sprite 0, then we have a sprite 0 hit
@@ -369,7 +415,7 @@ impl<'a> Ppu<'a> {
                         self.registers.ppu_status.set_sprite_0_hit(true);
                     }
                 } else {
-                    self.draw_pixel(pattern_data, palette_addr, true);
+                    self.draw_pixel(pattern_data, palette_addr);
                 }
             }
             for i in 0..8 {
@@ -385,7 +431,7 @@ impl<'a> Ppu<'a> {
             self.pt_lo_shift_reg <<= 1;
         }
 
-        // this is where the real meat is
+        // only scan if we're in the visible area
         if self.curr_scanline >= 240 && self.curr_scanline != 261 {
             // do nothing, unless we're at (1, 241) at which
             // we set the VBlank flag
@@ -403,74 +449,101 @@ impl<'a> Ppu<'a> {
                 self.registers.ppu_status.set_sprite_0_hit(false);
                 self.sprite_zero_sec_oam = false;
             }
-            // between 257 - 320 and 337-340 this scanline does nothing
-            if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
-            } else {
-                let end_offset = if col >= 321 && col <= 336 { 5 } else { 0 };
-                // on odd columns, we actually do the dirty work
-                match self.curr_col % 8 {
-                    // every 8 pixels, we reload the shift registers with whatever
-                    // is stored in the latches
-                    0 => {
-                        if col != 336 {
+
+            if self.registers.ppu_mask.show_bg() || self.registers.ppu_mask.show_sprites() {
+                // between 257 - 320 and 337-340 this scanline does nothing
+                if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
+                } else {
+                    // on odd columns, we actually do the dirty work
+                    match self.curr_col % 8 {
+                        // every 8 pixels, we reload the shift registers with whatever
+                        // is stored in the latches
+                        0 => {
+                            // if col != 336 {
                             // load the shift registers
-                            self.palette_hi_shift_reg =
+                            self.palette_hi_shift_reg |=
                                 if (self.attr_latch >> 1) == 1 { 0xff } else { 0 };
-                            self.palette_lo_shift_reg =
+                            self.palette_lo_shift_reg |=
                                 if (self.attr_latch & 1) == 1 { 0xff } else { 0 };
-                            self.pt_hi_shift_reg &= 0xff;
                             self.pt_hi_shift_reg |= self.hi_latch as u16;
-                            self.pt_lo_shift_reg &= 0xff;
                             self.pt_lo_shift_reg |= self.lo_latch as u16;
+                            // }
+                            if col != 0 {
+                                self.scroll_regs.inc_coarse_x();
+                            }
                         }
+                        1 => {
+                            // fetch nametable byte
+                            let vram_addr = 0x2000 | (self.scroll_regs.vram_addr.0 & 0xfff);
+                            self.nametable_latch = self.read(&vram_addr);
+                        }
+                        3 => {
+                            // fetch attr table byte
+                            // let (px_row, px_col) = self.get_operating_pix(14 + end_offset);
+                            let v = self.scroll_regs.vram_addr.0;
+                            let addr: u16 =
+                                (v & 0x0c00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07) | 0x23c0;
+                            let attr_byte = self.read(&addr);
+                            let coarse_x = self.scroll_regs.vram_addr.coarse_x();
+                            let coarse_y = self.scroll_regs.vram_addr.coarse_y();
+                            self.attr_latch = match ((coarse_y & 0b11) < 2, (coarse_x & 0b11) < 2) {
+                                (true, true) => attr_byte & 0x3,
+                                (true, false) => (attr_byte >> 2) & 0x3,
+                                (false, true) => (attr_byte >> 4) & 0x3,
+                                (false, false) => (attr_byte >> 6) & 0x3,
+                            };
+                        }
+                        5 => {
+                            // fetch low bg tile byte from pattern table
+                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                                | ((self.nametable_latch as u16) << 4)
+                                | self.scroll_regs.vram_addr.fine_y();
+                            self.lo_latch = self.read(&addr);
+                        }
+                        7 => {
+                            // fetch high bg tile byte
+                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                                | ((self.nametable_latch as u16) << 4)
+                                | self.scroll_regs.vram_addr.fine_y();
+                            self.hi_latch = self.read(&(addr + 8));
+                        }
+                        _ => {}
                     }
-                    1 => {
-                        // fetch nametable byte
-                        let (px_row, px_col) = self.get_operating_pix(8 + end_offset);
-                        let vram_addr = 0x2000 | (px_col >> 3) | ((px_row >> 3) << 5);
-                        self.nametable_latch = self.read(&vram_addr);
-                    }
-                    3 => {
-                        // fetch attr table byte
-                        let (px_row, px_col) = self.get_operating_pix(6 + end_offset);
-                        let vram_addr = 0x2000 | (px_col >> 3) | ((px_row >> 3) << 5);
-                        let mut row = (vram_addr >> 2) & 0x7;
-                        let mut col = (vram_addr >> 7) & 0x7;
-                        let temp = row;
-                        row = col;
-                        col = temp;
-                        let addr: u16 = (row << 3) as u16 | col as u16 | 0x23c0;
-                        // this currently gives the whole byte for a 4x4 tile area
-                        let attr_byte = self.read(&addr);
-                        self.attr_latch = match (px_row % 32 < 16, px_col % 32 < 16) {
-                            (true, true) => attr_byte & 0x3,
-                            (true, false) => (attr_byte >> 2) & 0x3,
-                            (false, true) => (attr_byte >> 4) & 0x3,
-                            (false, false) => (attr_byte >> 6) & 0x3,
-                        };
-                    }
-                    5 => {
-                        // fetch low bg tile byte from pattern table
-                        let (row, _) = self.get_operating_pix(4 + end_offset);
-                        let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
-                            | ((self.nametable_latch as u16) << 4)
-                            | ((row as u16) % 8);
-                        self.lo_latch = self.read(&addr);
-                    }
-                    7 => {
-                        // fetch high bg tile byte
-                        let (row, _) = self.get_operating_pix(2 + end_offset);
-                        let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
-                            | ((self.nametable_latch as u16) << 4)
-                            | ((row as u16) % 8);
-                        self.hi_latch = self.read(&(addr + 8));
-                    }
-                    _ => {}
+                }
+                // we increment fine y when we finish a scanline
+                if col == 256 {
+                    self.scroll_regs.inc_fine_y();
+                }
+
+                // transfer the x position over to vram
+                if col == 257 {
+                    self.scroll_regs
+                        .vram_addr
+                        .set_coarse_x(self.scroll_regs.temp_vram_addr.coarse_x());
+                    self.scroll_regs
+                        .vram_addr
+                        .set_bit(10, (self.scroll_regs.temp_vram_addr.nametable() & 1) == 1);
+                }
+
+                if self.curr_scanline == 261 && col >= 280 && col <= 304 {
+                    self.scroll_regs
+                        .vram_addr
+                        .set_fine_y(self.scroll_regs.temp_vram_addr.fine_y());
+                    self.scroll_regs
+                        .vram_addr
+                        .set_coarse_y(self.scroll_regs.temp_vram_addr.coarse_y());
+                    self.scroll_regs
+                        .vram_addr
+                        .set_bit(11, (self.scroll_regs.temp_vram_addr.nametable() >> 1) == 1);
                 }
             }
-            // even columns we rest
         }
+
         if self.curr_scanline == 241 && col == 0 {
+            self.canvas
+                .as_deref_mut()
+                .unwrap()
+                .set_draw_color(Color::RGB(255, 0, 0));
             self.canvas.as_deref_mut().unwrap().present();
         }
 
@@ -487,22 +560,28 @@ impl<'a> Ppu<'a> {
             0x1 => self.registers.ppu_mask.0,
             0x2 => {
                 self.addr_latch = None;
+                self.scroll_regs.w = false;
                 self.registers.ppu_status.0
             }
             0x3 | 0x4 => unreachable!(),
-            0x5 => self.registers.ppu_scroll,
-            0x6 => self.registers.ppu_addr,
             0x7 => {
-                if let Some(x) = self.addr_latch {
-                    let val = self.ppu_data_buffer;
-                    self.ppu_data_buffer = self.read(&x);
-                    let inc = self.registers.ppu_ctrl.vram_addr_inc();
-                    let inc2 = if inc { 32 } else { 1 };
-                    self.addr_latch = Some(x + inc2);
-                    val
-                } else {
-                    0
+                let x2 = self.scroll_regs.vram_addr.0;
+                let mut val = self.ppu_data_buffer;
+                self.ppu_data_buffer = self.read(&x2);
+                if x2 >= 0x3f00 {
+                    val = self.ppu_data_buffer;
                 }
+                if (self.registers.ppu_mask.show_bg() || self.registers.ppu_mask.show_sprites())
+                    && (self.curr_scanline == 261 || self.curr_scanline <= 239)
+                {
+                    self.scroll_regs.inc_coarse_x();
+                    self.scroll_regs.inc_fine_y();
+                } else {
+                    let inc2_ = self.registers.ppu_ctrl.vram_addr_inc();
+                    let inc22 = if inc2_ { 32 } else { 1 };
+                    self.scroll_regs.vram_addr.0 = x2 + inc22;
+                }
+                val
             }
             _ => unreachable!(),
         }
@@ -510,25 +589,57 @@ impl<'a> Ppu<'a> {
 
     pub fn cpu_write(&mut self, addr: &u16, val: u8) {
         match *addr {
-            0x0 => self.registers.ppu_ctrl.0 = val,
+            0x0 => {
+                self.registers.ppu_ctrl.0 = val;
+                self.scroll_regs
+                    .temp_vram_addr
+                    .set_nametable((val & 0x3) as u16);
+            }
             0x1 => self.registers.ppu_mask.0 = val,
             0x2 => self.registers.ppu_status.0 = val,
             0x3 | 0x4 => {} // for now assume unreachability
-            0x5 => self.registers.ppu_scroll = val,
-            0x6 => {
-                if let Some(x) = self.addr_latch {
-                    self.addr_latch = Some((x << 8) | (val as u16));
+            0x5 => {
+                if !self.scroll_regs.w {
+                    // first write
+                    self.scroll_regs
+                        .temp_vram_addr
+                        .set_coarse_x((val >> 3) as u16);
+                    self.scroll_regs.fine_x = val & 0x7;
+                    self.scroll_regs.w = true;
                 } else {
-                    self.addr_latch = Some(val as u16);
+                    self.scroll_regs
+                        .temp_vram_addr
+                        .set_fine_y((val & 0x7) as u16);
+                    self.scroll_regs
+                        .temp_vram_addr
+                        .set_coarse_y((val >> 3) as u16);
+                    self.scroll_regs.w = false;
                 }
-                self.registers.ppu_addr = val;
+            }
+            0x6 => {
+                if !self.scroll_regs.w {
+                    self.scroll_regs.temp_vram_addr.0 =
+                        ((val as u16) << 8) | (self.scroll_regs.temp_vram_addr.0 & 0xff);
+                    self.scroll_regs.w = true;
+                } else {
+                    self.scroll_regs.temp_vram_addr.0 =
+                        (self.scroll_regs.temp_vram_addr.0 & 0xff00) | (val as u16);
+                    self.scroll_regs.w = false;
+                    self.scroll_regs.vram_addr.0 = self.scroll_regs.temp_vram_addr.0;
+                }
             }
             0x7 => {
-                if let Some(x) = self.addr_latch {
-                    self.write(&x, val);
-                    let inc = self.registers.ppu_ctrl.vram_addr_inc();
-                    let inc2 = if inc { 32 } else { 1 };
-                    self.addr_latch = Some(x + inc2);
+                let x2 = self.scroll_regs.vram_addr.0;
+                self.write(&x2, val);
+                if (self.registers.ppu_mask.show_bg() || self.registers.ppu_mask.show_sprites())
+                    && (self.curr_scanline == 261 || self.curr_scanline <= 239)
+                {
+                    self.scroll_regs.inc_coarse_x();
+                    self.scroll_regs.inc_fine_y();
+                } else {
+                    let inc2_ = self.registers.ppu_ctrl.vram_addr_inc();
+                    let inc22 = if inc2_ { 32 } else { 1 };
+                    self.scroll_regs.vram_addr.0 = x2 + inc22;
                 }
             }
             _ => unreachable!(),
@@ -545,7 +656,17 @@ impl<'a> Ppu<'a> {
                 self.vram[(*addr & 0x7ff) as usize]
             } else {
                 // 2400 -> 2000, 2c00 -> 2800
-                self.vram[(*addr & 0xbff) as usize]
+                // let mut a = *addr;
+                // if a >= 0x3000 {
+                //     a -= 0x1000;
+                // }
+                // if a >= 0x2400 && a < 0x2c00 {
+                //     a -= 0x400;
+                // } else if a >= 0x2c00 {
+                //     a -= 0x800;
+                // }
+                // self.vram[(a - 0x2000) as usize]
+                self.vram[(*addr & 0x7ff) as usize]
             }
         } else if *addr <= 0x3fff {
             let mut palette_index = (*addr & 0x1f) as usize;
@@ -563,7 +684,22 @@ impl<'a> Ppu<'a> {
             // pattern memory, assume for now it's a rom and is unwritable
             self.rom.as_deref_mut().unwrap().ppu_write(addr, val);
         } else if *addr <= 0x3eff {
-            self.vram[(*addr & 0x7ff) as usize] = val;
+            let vert_mirroring = self.rom.as_ref().unwrap().header.mirroring();
+            if vert_mirroring {
+                self.vram[(*addr & 0x7ff) as usize] = val;
+            } else {
+                let mut a = *addr;
+                // if a >= 0x3000 {
+                //     a -= 0x1000;
+                // }
+                // if a >= 0x2400 && a < 0x2c00 {
+                //     a -= 0x400;
+                // } else if a >= 0x2c00 {
+                //     a -= 0x800;
+                // }
+                // self.vram[(a - 0x2000) as usize] = val;
+                self.vram[(*addr & 0x7ff) as usize] = val;
+            }
         } else if *addr <= 0x3fff {
             // palette tables
             let mut palette_index = (*addr & 0x1f) as usize;
