@@ -1,4 +1,4 @@
-Rusti-NESs
+retro-game
 ==
 **A NES emulator written in Rust.**
 
