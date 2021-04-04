@@ -1,2 +1,5 @@
 /target
 *.nes
+out*
+*.log
+*.deb
