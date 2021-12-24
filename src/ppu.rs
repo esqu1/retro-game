@@ -1,3 +1,6 @@
+//! See https://wiki.nesdev.org/w/images/d/d1/Ntsc_timing.png
+//! for an image of the frame timings.
+
 use crate::rom::NesRom;
 use bitfield::*;
 use sdl2::pixels::Color;
@@ -692,15 +695,26 @@ impl<'a> Ppu<'a> {
         }
     }
 
+    /// Reads from the PPU's internal VRAM space. The VRAM of a PPU takes up 16KB
+    /// (until $3FFF).
+    /// - $0000 to $1FFF store pattern tables, which are mapped to in the ROM.
+    /// - $2000 to $2FFF store nametables, which is where the PPU reads from to render.
+    /// - $3000 to $3EFF mirror the previous region.
+    /// - $3F00 to $3F1F represents the palette RAM.
+    /// - $3F20 to $3FFF mirror the previous region.
     pub fn read(&self, addr: &u16) -> u8 {
         if *addr <= 0x1fff {
+            // Pattern tables
+            // TODO: make this not read directly from ROM
             self.rom.as_ref().unwrap().ppu_read(addr)
         } else if *addr <= 0x3eff {
+            // Name tables
             let vert_mirroring = self.rom.as_ref().unwrap().header.mirroring();
             if vert_mirroring {
                 // 2800 -> 2000, 2c00 -> 2400
                 self.vram[(*addr & 0x7ff) as usize]
             } else {
+                // TODO: properly implement vertical mirroring
                 // 2400 -> 2000, 2c00 -> 2800
                 // let mut a = *addr;
                 // if a >= 0x3000 {
@@ -715,6 +729,7 @@ impl<'a> Ppu<'a> {
                 self.vram[(*addr & 0x7ff) as usize]
             }
         } else if *addr <= 0x3fff {
+            // Palette RAM
             let mut palette_index = (*addr & 0x1f) as usize;
             if *addr % 4 == 0 && *addr >= 0x3f10 {
                 palette_index -= 0x10;

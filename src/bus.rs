@@ -1,3 +1,8 @@
+//! You can think of the bus as the central hub where all the components of the NES
+//! sort of "dock" at. The bus serves as a read-write port for the registers of
+//! the NES components, provides a unified mapping between them and also manages the
+//! clocking of the overall system.
+
 use crate::ppu::Ppu;
 use crate::rom::NesRom;
 use sdl2::render::WindowCanvas;

@@ -1,3 +1,10 @@
+//! This is the ISA used by the 6502 processor.
+//! I liked using this reference for mapping opcodes to the respective instruction
+//! and addressing mode:
+//!
+//! https://www.masswerk.at/6502/6502_instruction_set.html
+//!
+
 use strum_macros::Display;
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Display)]
@@ -68,27 +75,51 @@ pub enum Opcode {
     NOP,
 }
 
+/// Addressing mode for a specific instruction.
+/// Note that in an actual rom, the nibbles of addresses will be given in reverse.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Display)]
 pub enum AddressingMode {
+    // Refers to that address directly.
+    // e.g. OP $LLHH -> whatever is at address $HHLL
     Abs,
+    // Refers to an address directly with offset from CPU `X` register, with carry.
+    // e.g. OP $LLHH, X -> whatever is at address ($HHLL + X)
     AbsX,
+    // Refers to an address directly with offset from CPU `Y` register, with carry.
+    // e.g. OP $LLHH, Y -> whatever is at address ($HHLL + Y)
     AbsY,
+    // Refers to an address indirectly, i.e. read whatever is at the address value, then
+    // read _that_ address.
+    // e.g. OP ($LLHH) -> whatever is at address MEM[$HHLL]
     Ind,
+    // Refers to an address indirectly, i.e. read whatever is at the address value plus
+    // an offset by X, then read _that_ address. (NO CARRY)
+    // e.g. OP ($LL,X) -> whatever is at address MEM[$00LL + X]
     IndX,
+    // Refers to an address indirectly, i.e. read whatever is at the address value, then
+    // read _that_ address plus an offset by Y.
+    // e.g. OP ($LL),Y -> whatever is at address MEM[$00LL] + Y
     IndY,
+    // Basically a direct offset where the high nibble of the address is zero.
+    // e.g. OP $LL -> whatever is at address $00LL
     Zpg,
     ZpgX,
     ZpgY,
-    // Others
+    // Uses a literal value.
     Imm,
+    // Uses the value in the CPU `A` register.
     Acc,
+    // No values here!
     Imp,
+    // Get the address with an offset from the program counter `PC`.
     Rel,
 }
 
 use AddressingMode::*;
 use Opcode::*;
 
+// None here means that undefined behavior will happen if that particular opcode combo is
+// used.
 #[allow(dead_code)]
 pub const OPCODE_MATRIX: [[Option<(Opcode, AddressingMode, u8)>; 0x10]; 0x10] = [
     [

@@ -1,3 +1,14 @@
+//! The CPU stores a couple of registers in order to maintain some sort of state.
+//! - The `A` register, which stores 8 bits and is used for arithmetic.
+//! - The `X` and `Y` registers, which each store 8 bits and are used for addressing
+//!   themselves.
+//! - The `PC` register, which points to instruction locations in the ROM.
+//! - The `S` and `P` registers.
+//!
+//!
+//! The CPU consumes an assembly language of its own (commonly called an ISA).
+//!
+
 use crate::bus::Bus;
 use crate::isa::*;
 use bitfield::*;
