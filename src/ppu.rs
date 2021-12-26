@@ -140,6 +140,9 @@ struct BackgroundLatch {
     hi_latch: u8,        // high byte latch for bg rendering
 }
 
+// You can think of this as a queue for the next few pixels that are going to be drawn
+// for the background. The bits that are fetched and placed into these determine the
+// index into the palette tables that we should get the color of the pixel from.
 #[derive(Default)]
 struct BackgroundShiftRegs {
     pt_lo_shift_reg: u16, // for drawing from pt, contains data for next two tiles
@@ -232,7 +235,7 @@ pub struct Ppu<'a> {
     pub nmi: bool,          // represents if we want to trigger a nmi
     addr_latch: Option<u16>,
 
-    scroll_regs: ScrollRegisters,
+    scroll_regs: ScrollRegisters, // $2005
     bg_latch: BackgroundLatch,
     bg_shift_regs: BackgroundShiftRegs,
     sprite_eval: SpriteEvaluationVars,
@@ -278,8 +281,8 @@ impl<'a> Ppu<'a> {
         self.canvas = Some(canvas);
     }
 
-    fn draw_pixel(&mut self, palette_index: u16, palette_addr: u16) {
-        let mut new_palette_addr = palette_addr + palette_index;
+    fn draw_pixel(&mut self, palette_addr: u16) {
+        let mut new_palette_addr = palette_addr;
         if new_palette_addr % 4 == 0 {
             new_palette_addr = 0x3f00;
         }
@@ -296,294 +299,319 @@ impl<'a> Ppu<'a> {
             .expect("Could not write to canvas.");
     }
 
+    fn enable_vblank(&mut self) {
+        self.registers.ppu_status.set_vblank(true);
+        if self.registers.ppu_ctrl.vblank_nmi() {
+            self.nmi = true;
+        }
+    }
+
+    fn clear_vblank(&mut self) {
+        self.registers.ppu_status.set_vblank(false);
+        // clear sprite 0 hit
+        self.registers.ppu_status.set_sprite_0_hit(false);
+        self.sprite_eval.has_sprite_zero = false;
+    }
+
+    fn process_visible_pixel(&mut self) {
+        let col = self.curr_col;
+        if col == 0 {
+            return;
+        }
+        match col % 8 {
+            // every 8 pixels, we reload the shift registers with whatever
+            // is stored in the latches
+            0 => {
+                // load the shift registers
+                self.bg_shift_regs.palette_hi_shift_reg |= if (self.bg_latch.attr_latch >> 1) == 1 {
+                    0xff
+                } else {
+                    0
+                };
+                self.bg_shift_regs.palette_lo_shift_reg |= if (self.bg_latch.attr_latch & 1) == 1 {
+                    0xff
+                } else {
+                    0
+                };
+                self.bg_shift_regs.pt_hi_shift_reg |= self.bg_latch.hi_latch as u16;
+                self.bg_shift_regs.pt_lo_shift_reg |= self.bg_latch.lo_latch as u16;
+                self.scroll_regs.inc_coarse_x();
+            }
+            1 => {
+                // fetch nametable byte
+                let vram_addr = 0x2000 | (self.scroll_regs.vram_addr.0 & 0xfff);
+                self.bg_latch.nametable_latch = self.read(&vram_addr);
+            }
+            3 => {
+                // fetch attr table byte
+                // let (px_row, px_col) = self.get_operating_pix(14 + end_offset);
+                let v = self.scroll_regs.vram_addr.0;
+                let addr: u16 = (v & 0x0c00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07) | 0x23c0;
+                let attr_byte = self.read(&addr);
+                let coarse_x = self.scroll_regs.vram_addr.coarse_x();
+                let coarse_y = self.scroll_regs.vram_addr.coarse_y();
+                self.bg_latch.attr_latch = match ((coarse_y & 0b11) < 2, (coarse_x & 0b11) < 2) {
+                    (true, true) => attr_byte & 0x3,
+                    (true, false) => (attr_byte >> 2) & 0x3,
+                    (false, true) => (attr_byte >> 4) & 0x3,
+                    (false, false) => (attr_byte >> 6) & 0x3,
+                };
+            }
+            5 => {
+                // fetch low bg tile byte from pattern table
+                let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                    | ((self.bg_latch.nametable_latch as u16) << 4)
+                    | self.scroll_regs.vram_addr.fine_y();
+                self.bg_latch.lo_latch = self.read(&addr);
+            }
+            7 => {
+                // fetch high bg tile byte
+                let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
+                    | ((self.bg_latch.nametable_latch as u16) << 4)
+                    | self.scroll_regs.vram_addr.fine_y();
+                self.bg_latch.hi_latch = self.read(&(addr + 8));
+            }
+            _ => {}
+        }
+    }
+
+    fn process_sprite_registers(&mut self) {
+        // TODO: refactor this mess
+        let col = self.curr_col;
+        let scanline = self.curr_scanline;
+        if scanline <= 239 {
+            if col >= 1 && col <= 64 && (col % 2 == 1) {
+                // at the beginning of each scanline, clear secondary OAM
+                self.secondary_oam_write(&((col as u8) >> 1), 0xff);
+            } else if col >= 65 && col <= 256 {
+                // sprite evaluation
+                if self.sprite_eval.scan_n == 64 {
+                } else if self.sprite_eval.secondary_oam_ptr == 32 {
+                    // if we have enough sprites, check to see if there are any more
+                    let potential_overflow =
+                        self.oam_read(&((self.sprite_eval.scan_n << 2) | self.sprite_eval.scan_m));
+                    let height = if self.registers.ppu_ctrl.sprite_size() {
+                        16
+                    } else {
+                        8
+                    };
+                    if scanline - (potential_overflow as u16) < height {
+                        // we're in range, set the overflow flag
+                        self.registers.ppu_status.set_sprite_overflow(true);
+                        self.sprite_eval.scan_n = 64;
+                    } else {
+                        self.sprite_eval.scan_m += 1;
+                        if self.sprite_eval.scan_m == 4 {
+                            self.sprite_eval.scan_n += 1;
+                            self.sprite_eval.scan_m = 0;
+                        }
+                    }
+                } else if self.sprite_eval.cycles == 0 {
+                    let eval_sprite_y = self.oam_read(&(self.sprite_eval.scan_n << 2)) + 1;
+                    let height = if self.registers.ppu_ctrl.sprite_size() {
+                        16
+                    } else {
+                        8
+                    };
+                    if scanline >= (eval_sprite_y as u16)
+                        && scanline - (eval_sprite_y as u16) < height
+                    {
+                        self.sprite_eval.cycles += 7;
+                        self.sprite_eval.alt_latch = eval_sprite_y;
+                        if self.sprite_eval.scan_n == 0 {
+                            // if this is sprite 0, then it will appear first
+                            self.sprite_eval.has_sprite_zero = true;
+                        }
+                    } else {
+                        self.sprite_eval.cycles = -1;
+                    }
+                } else if self.sprite_eval.cycles == -1 {
+                    self.sprite_eval.cycles = 0;
+                    self.sprite_eval.scan_n += 1;
+                } else {
+                    if col % 2 == 1 {
+                        // read
+                        self.sprite_eval.alt_latch = self
+                            .oam_read(&((self.sprite_eval.scan_n << 2) | self.sprite_eval.scan_m));
+                    } else {
+                        // write
+                        let addr = self.sprite_eval.secondary_oam_ptr.clone();
+                        self.secondary_oam_write(&addr, self.sprite_eval.alt_latch);
+                        self.sprite_eval.secondary_oam_ptr += 1;
+                        self.sprite_eval.scan_m += 1;
+                        if self.sprite_eval.scan_m == 4 {
+                            self.sprite_eval.scan_n += 1;
+                            self.sprite_eval.scan_m = 0;
+                        }
+                    }
+                    self.sprite_eval.cycles -= 1;
+                }
+            } else if col >= 257 && col <= 320 {
+                let n = (((col - 1) % 64) >> 3) as u8;
+                let sec_oam_addr = n << 2;
+                // load the shift registers with the sprite palette info
+                match col % 8 {
+                    1 => {
+                        // load y into the pattern table register for now
+                        self.sprite_render.sprite_hi_shift_reg[n as usize] =
+                            self.secondary_oam_read(&sec_oam_addr);
+                    }
+                    5 => {
+                        // load the pattern table data into the shift registers
+                        let y = self.sprite_render.sprite_hi_shift_reg[n as usize] as u16;
+                        if y != 0xff {
+                            let pt_byte = self.secondary_oam_read(&(sec_oam_addr + 1));
+                            let attr = self.sprite_render.sprite_attr_latch[n as usize];
+                            let offset = if (attr >> 7) == 1 {
+                                7 - (scanline - y)
+                            } else {
+                                scanline - y
+                            };
+                            let addr = ((pt_byte as u16) << 4) + offset;
+                            let lo_byte = self.read(&addr);
+                            let hi_byte = self.read(&(addr + 8));
+                            self.sprite_render.sprite_lo_shift_reg[n as usize] = lo_byte;
+                            self.sprite_render.sprite_hi_shift_reg[n as usize] = hi_byte;
+                        }
+                    }
+                    3 => {
+                        // load attribute data
+                        self.sprite_render.sprite_attr_latch[n as usize] =
+                            self.secondary_oam_read(&(sec_oam_addr + 2));
+                    }
+                    7 => {
+                        // load the X coordinate counter to be decremented
+                        self.sprite_render.sprite_x_ctr[n as usize] =
+                            self.secondary_oam_read(&(sec_oam_addr + 3)) as i16 + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn draw_current_pixel(&mut self) {
+        let fine_x = self.scroll_regs.fine_x;
+        let palette_info = ((self.bg_shift_regs.palette_hi_shift_reg >> (14 - fine_x)) & 0x2)
+            | ((self.bg_shift_regs.palette_lo_shift_reg >> (15 - fine_x)) & 1);
+        let palette_addr = 0x3f00 | ((palette_info as u16) << 2);
+
+        // select bit of pattern table based on fine_x scroll
+        let pattern_data = ((self.bg_shift_regs.pt_hi_shift_reg >> (14 - fine_x)) & 0x2)
+            | ((self.bg_shift_regs.pt_lo_shift_reg >> (15 - fine_x)) & 1);
+
+        let background_palette_addr = palette_addr + pattern_data;
+
+        if !self.registers.ppu_mask.show_sprites() {
+            // just draw the background color if there's no sprites enabled
+            self.draw_pixel(background_palette_addr);
+        } else {
+            if let Some(top_most_sprite) = self.sprite_render.get_first_opaque_sprite() {
+                let attr = self.sprite_render.sprite_attr_latch[top_most_sprite];
+                let palette_index = self.sprite_render.get_palette_index(top_most_sprite);
+                // if we were originally going to draw a transparent background,
+                // then priority doesn't matter here
+                if (palette_addr | pattern_data) % 4 == 0 || (attr & 0x20) == 0 {
+                    if palette_index == 0 {
+                        // if the sprite is transparent at this pixel
+                        self.draw_pixel(background_palette_addr);
+                    } else {
+                        let palette = 0x3f10 | ((attr & 0x3) << 2) as u16;
+                        self.draw_pixel(palette_index as u16 + palette);
+                    }
+                } else {
+                    self.draw_pixel(background_palette_addr);
+                }
+                // sprite pixel is opaque, check to see if background is also opaque;
+                // if this is sprite 0, then we have a sprite 0 hit
+                if self.sprite_eval.has_sprite_zero
+                    && top_most_sprite == 0
+                    && palette_index != 0
+                    && (palette_addr | pattern_data) % 4 != 0
+                {
+                    self.registers.ppu_status.set_sprite_0_hit(true);
+                }
+            } else {
+                self.draw_pixel(background_palette_addr);
+            }
+        }
+        for i in 0..8 {
+            self.sprite_render.sprite_x_ctr[i] -= 1;
+        }
+    }
+
+    // Clocks a single cycle of the PPU.
     pub fn clock(&mut self) {
         let col = self.curr_col;
         let scanline = self.curr_scanline;
 
+        // reset the sprite registers
         if col == 257 {
-            // reset the registers
             self.sprite_eval.reset();
             self.sprite_render.reset();
         }
 
         // check if we're allowed to render sprites now
         if self.registers.ppu_mask.show_sprites() {
-            if scanline <= 239 {
-                if col >= 1 && col <= 64 && (col % 2 == 1) {
-                    // at the beginning of each scanline, clear secondary OAM
-                    self.secondary_oam_write(&((col as u8) >> 1), 0xff);
-                } else if col >= 65 && col <= 256 {
-                    // sprite evaluation
-                    if self.sprite_eval.scan_n == 64 {
-                    } else if self.sprite_eval.secondary_oam_ptr == 32 {
-                        // if we have enough sprites, check to see if there are any more
-                        let potential_overflow = self
-                            .oam_read(&((self.sprite_eval.scan_n << 2) | self.sprite_eval.scan_m));
-                        let height = if self.registers.ppu_ctrl.sprite_size() {
-                            16
-                        } else {
-                            8
-                        };
-                        if scanline - (potential_overflow as u16) < height {
-                            // we're in range, set the overflow flag
-                            self.registers.ppu_status.set_sprite_overflow(true);
-                            self.sprite_eval.scan_n = 64;
-                        } else {
-                            self.sprite_eval.scan_m += 1;
-                            if self.sprite_eval.scan_m == 4 {
-                                self.sprite_eval.scan_n += 1;
-                                self.sprite_eval.scan_m = 0;
-                            }
-                        }
-                    } else if self.sprite_eval.cycles == 0 {
-                        let eval_sprite_y = self.oam_read(&(self.sprite_eval.scan_n << 2)) + 1;
-                        let height = if self.registers.ppu_ctrl.sprite_size() {
-                            16
-                        } else {
-                            8
-                        };
-                        if scanline >= (eval_sprite_y as u16)
-                            && scanline - (eval_sprite_y as u16) < height
-                        {
-                            self.sprite_eval.cycles += 7;
-                            self.sprite_eval.alt_latch = eval_sprite_y;
-                            if self.sprite_eval.scan_n == 0 {
-                                // if this is sprite 0, then it will appear first
-                                self.sprite_eval.has_sprite_zero = true;
-                            }
-                        } else {
-                            self.sprite_eval.cycles = -1;
-                        }
-                    } else if self.sprite_eval.cycles == -1 {
-                        self.sprite_eval.cycles = 0;
-                        self.sprite_eval.scan_n += 1;
-                    } else {
-                        if col % 2 == 1 {
-                            // read
-                            self.sprite_eval.alt_latch = self.oam_read(
-                                &((self.sprite_eval.scan_n << 2) | self.sprite_eval.scan_m),
-                            );
-                        } else {
-                            // write
-                            let addr = self.sprite_eval.secondary_oam_ptr.clone();
-                            self.secondary_oam_write(&addr, self.sprite_eval.alt_latch);
-                            self.sprite_eval.secondary_oam_ptr += 1;
-                            self.sprite_eval.scan_m += 1;
-                            if self.sprite_eval.scan_m == 4 {
-                                self.sprite_eval.scan_n += 1;
-                                self.sprite_eval.scan_m = 0;
-                            }
-                        }
-                        self.sprite_eval.cycles -= 1;
-                    }
-                } else if col >= 257 && col <= 320 {
-                    let n = (((col - 1) % 64) >> 3) as u8;
-                    let sec_oam_addr = n << 2;
-                    // load the shift registers with the sprite palette info
-                    match col % 8 {
-                        1 => {
-                            // load y into the pattern table register for now
-                            self.sprite_render.sprite_hi_shift_reg[n as usize] =
-                                self.secondary_oam_read(&sec_oam_addr);
-                        }
-                        5 => {
-                            // load the pattern table data into the shift registers
-                            let y = self.sprite_render.sprite_hi_shift_reg[n as usize] as u16;
-                            if y != 0xff {
-                                let pt_byte = self.secondary_oam_read(&(sec_oam_addr + 1));
-                                let attr = self.sprite_render.sprite_attr_latch[n as usize];
-                                let offset = if (attr >> 7) == 1 {
-                                    7 - (scanline - y)
-                                } else {
-                                    scanline - y
-                                };
-                                let addr = ((pt_byte as u16) << 4) + offset;
-                                let lo_byte = self.read(&addr);
-                                let hi_byte = self.read(&(addr + 8));
-                                self.sprite_render.sprite_lo_shift_reg[n as usize] = lo_byte;
-                                self.sprite_render.sprite_hi_shift_reg[n as usize] = hi_byte;
-                            }
-                        }
-                        3 => {
-                            // load attribute data
-                            self.sprite_render.sprite_attr_latch[n as usize] =
-                                self.secondary_oam_read(&(sec_oam_addr + 2));
-                        }
-                        7 => {
-                            // load the X coordinate counter to be decremented
-                            self.sprite_render.sprite_x_ctr[n as usize] =
-                                self.secondary_oam_read(&(sec_oam_addr + 3)) as i16 + 1;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            self.process_sprite_registers();
         }
 
-        ////////////
-        // DRAWING
-        ////////////
+        // within the visible area of the PPU, do the actual drawing of that pixel
         if col <= 255 && scanline <= 239 {
-            let fine_x = self.scroll_regs.fine_x;
-            let palette_info = ((self.bg_shift_regs.palette_hi_shift_reg >> (14 - fine_x)) & 0x2)
-                | ((self.bg_shift_regs.palette_lo_shift_reg >> (15 - fine_x)) & 1);
-            let palette_addr = 0x3f00 | ((palette_info as u16) << 2);
-
-            // select bit of pattern table based on fine_x scroll
-            let pattern_data = ((self.bg_shift_regs.pt_hi_shift_reg >> (14 - fine_x)) & 0x2)
-                | ((self.bg_shift_regs.pt_lo_shift_reg >> (15 - fine_x)) & 1);
-            if !self.registers.ppu_mask.show_sprites() {
-                self.draw_pixel(pattern_data, palette_addr);
-            } else {
-                if let Some(top_most_sprite) = self.sprite_render.get_first_opaque_sprite() {
-                    let attr = self.sprite_render.sprite_attr_latch[top_most_sprite];
-                    let palette_index = self.sprite_render.get_palette_index(top_most_sprite);
-                    // if we were originally going to draw a transparent background,
-                    // then priority doesn't matter here
-                    if (palette_addr | pattern_data) % 4 == 0 || (attr & 0x20) == 0 {
-                        if palette_index == 0 {
-                            // if the sprite is transparent at this pixel
-                            self.draw_pixel(pattern_data, palette_addr);
-                        } else {
-                            let palette = 0x3f10 | ((attr & 0x3) << 2) as u16;
-                            self.draw_pixel(palette_index as u16, palette);
-                        }
-                    } else {
-                        self.draw_pixel(pattern_data, palette_addr);
-                    }
-                    // sprite pixel is opaque, check to see if background is also opaque;
-                    // if this is sprite 0, then we have a sprite 0 hit
-                    if self.sprite_eval.has_sprite_zero
-                        && top_most_sprite == 0
-                        && palette_index != 0
-                        && (palette_addr | pattern_data) % 4 != 0
-                    {
-                        self.registers.ppu_status.set_sprite_0_hit(true);
-                    }
-                } else {
-                    self.draw_pixel(pattern_data, palette_addr);
-                }
-            }
-            for i in 0..8 {
-                self.sprite_render.sprite_x_ctr[i] -= 1;
-            }
+            self.draw_current_pixel();
         }
-        // only scan if we're in the visible area
-        if scanline >= 240 && scanline != 261 {
-            // do nothing, unless we're at (1, 241) at which
-            // we set the VBlank flag
-            if scanline == 241 && col == 1 {
-                self.registers.ppu_status.set_vblank(true);
-                if self.registers.ppu_ctrl.vblank_nmi() {
-                    self.nmi = true;
-                }
+
+        // do nothing, unless we're at (1, 241) at which
+        // we set the VBlank flag
+        if (scanline, col) == (241, 1) {
+            self.enable_vblank();
+        }
+
+        // oh also, at (261, 1) we should say that the vblank is ended
+        if (scanline, col) == (261, 1) {
+            self.clear_vblank();
+        }
+
+        let is_fetchable_scanline = scanline < 240 || scanline == 261;
+        let is_mask_fetchable =
+            self.registers.ppu_mask.show_bg() || self.registers.ppu_mask.show_sprites();
+
+        if is_fetchable_scanline && is_mask_fetchable {
+            // between 257 - 320 and 337-340 this scanline does nothing
+            if col < 257 || (col >= 321 && col <= 336) {
+                // on odd columns, we actually do the dirty work
+                self.process_visible_pixel();
             }
-        } else {
-            // oh also, at (1, 261) we should say that the vblank is ended
-            if scanline == 261 && self.curr_col == 1 {
-                self.registers.ppu_status.set_vblank(false);
-                // clear sprite 0 hit
-                self.registers.ppu_status.set_sprite_0_hit(false);
-                self.sprite_eval.has_sprite_zero = false;
+
+            // we increment fine y when we finish a scanline
+            if col == 256 {
+                self.scroll_regs.inc_fine_y();
             }
 
-            if self.registers.ppu_mask.show_bg() || self.registers.ppu_mask.show_sprites() {
-                // between 257 - 320 and 337-340 this scanline does nothing
-                if (col >= 257 && col <= 320) || (col >= 337 && col <= 340) {
-                } else {
-                    // on odd columns, we actually do the dirty work
-                    match self.curr_col % 8 {
-                        // every 8 pixels, we reload the shift registers with whatever
-                        // is stored in the latches
-                        0 => {
-                            if col != 0 {
-                                // load the shift registers
-                                self.bg_shift_regs.palette_hi_shift_reg |=
-                                    if (self.bg_latch.attr_latch >> 1) == 1 {
-                                        0xff
-                                    } else {
-                                        0
-                                    };
-                                self.bg_shift_regs.palette_lo_shift_reg |=
-                                    if (self.bg_latch.attr_latch & 1) == 1 {
-                                        0xff
-                                    } else {
-                                        0
-                                    };
-                                self.bg_shift_regs.pt_hi_shift_reg |= self.bg_latch.hi_latch as u16;
-                                self.bg_shift_regs.pt_lo_shift_reg |= self.bg_latch.lo_latch as u16;
-                                self.scroll_regs.inc_coarse_x();
-                            }
-                        }
-                        1 => {
-                            // fetch nametable byte
-                            let vram_addr = 0x2000 | (self.scroll_regs.vram_addr.0 & 0xfff);
-                            self.bg_latch.nametable_latch = self.read(&vram_addr);
-                        }
-                        3 => {
-                            // fetch attr table byte
-                            // let (px_row, px_col) = self.get_operating_pix(14 + end_offset);
-                            let v = self.scroll_regs.vram_addr.0;
-                            let addr: u16 =
-                                (v & 0x0c00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07) | 0x23c0;
-                            let attr_byte = self.read(&addr);
-                            let coarse_x = self.scroll_regs.vram_addr.coarse_x();
-                            let coarse_y = self.scroll_regs.vram_addr.coarse_y();
-                            self.bg_latch.attr_latch =
-                                match ((coarse_y & 0b11) < 2, (coarse_x & 0b11) < 2) {
-                                    (true, true) => attr_byte & 0x3,
-                                    (true, false) => (attr_byte >> 2) & 0x3,
-                                    (false, true) => (attr_byte >> 4) & 0x3,
-                                    (false, false) => (attr_byte >> 6) & 0x3,
-                                };
-                        }
-                        5 => {
-                            // fetch low bg tile byte from pattern table
-                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
-                                | ((self.bg_latch.nametable_latch as u16) << 4)
-                                | self.scroll_regs.vram_addr.fine_y();
-                            self.bg_latch.lo_latch = self.read(&addr);
-                        }
-                        7 => {
-                            // fetch high bg tile byte
-                            let addr = ((self.registers.ppu_ctrl.bg_pt_addr() as u16) << 12)
-                                | ((self.bg_latch.nametable_latch as u16) << 4)
-                                | self.scroll_regs.vram_addr.fine_y();
-                            self.bg_latch.hi_latch = self.read(&(addr + 8));
-                        }
-                        _ => {}
-                    }
-                }
-                // we increment fine y when we finish a scanline
-                if col == 256 {
-                    self.scroll_regs.inc_fine_y();
-                }
+            // transfer the x position over to vram
+            if col == 257 {
+                self.scroll_regs
+                    .vram_addr
+                    .set_coarse_x(self.scroll_regs.temp_vram_addr.coarse_x());
+                self.scroll_regs
+                    .vram_addr
+                    .set_bit(10, (self.scroll_regs.temp_vram_addr.nametable() & 1) == 1);
+            }
 
-                // transfer the x position over to vram
-                if col == 257 {
-                    self.scroll_regs
-                        .vram_addr
-                        .set_coarse_x(self.scroll_regs.temp_vram_addr.coarse_x());
-                    self.scroll_regs
-                        .vram_addr
-                        .set_bit(10, (self.scroll_regs.temp_vram_addr.nametable() & 1) == 1);
-                }
-
-                if scanline == 261 && col >= 280 && col <= 304 {
-                    self.scroll_regs
-                        .vram_addr
-                        .set_fine_y(self.scroll_regs.temp_vram_addr.fine_y());
-                    self.scroll_regs
-                        .vram_addr
-                        .set_coarse_y(self.scroll_regs.temp_vram_addr.coarse_y());
-                    self.scroll_regs
-                        .vram_addr
-                        .set_bit(11, (self.scroll_regs.temp_vram_addr.nametable() >> 1) == 1);
-                }
+            if scanline == 261 && col >= 280 && col <= 304 {
+                self.scroll_regs
+                    .vram_addr
+                    .set_fine_y(self.scroll_regs.temp_vram_addr.fine_y());
+                self.scroll_regs
+                    .vram_addr
+                    .set_coarse_y(self.scroll_regs.temp_vram_addr.coarse_y());
+                self.scroll_regs
+                    .vram_addr
+                    .set_bit(11, (self.scroll_regs.temp_vram_addr.nametable() >> 1) == 1);
             }
         }
 
-        if scanline == 241 && col == 0 {
+        if (scanline, col) == (241, 0) {
             self.canvas
                 .as_deref_mut()
                 .unwrap()
@@ -591,14 +619,18 @@ impl<'a> Ppu<'a> {
             self.canvas.as_deref_mut().unwrap().present();
         }
 
-        // shift
+        // shift the shift registers
         if col < 336 {
             self.bg_shift_regs.shift();
         }
 
+        self.move_to_next_pixel();
+    }
+
+    fn move_to_next_pixel(&mut self) {
         self.curr_col += 1;
         if self.curr_col == 341 {
-            self.curr_scanline = (scanline + 1) % 262;
+            self.curr_scanline = (self.curr_scanline + 1) % 262;
             self.curr_col = 0;
         }
     }
